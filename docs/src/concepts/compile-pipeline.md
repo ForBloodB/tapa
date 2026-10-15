@@ -37,8 +37,8 @@ placement + timing constraints
 .xo file
     ╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌ (TAPA boundary) ╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌
     │
-    ▼  v++ --link     (Vitis, not TAPA)
-.xclbin
+    ├─ U-series: v++ --link (Vitis) ──► .xclbin
+    └─ V80:       tapa link (SLASH) ──► .vbin
 ```
 
 **`tapa analyze`** — Runs `tapacc` locally, one process over every input
@@ -60,7 +60,7 @@ the channels that cross SLR boundaries. It writes `floorplan.xdc`, which
 see [Performance Tuning](../howto/performance-tuning.md) for when it helps.
 
 **`tapa pack`** — Combines the per-task RTL into a single Xilinx IP package
-(`.xo` file) suitable for `v++ --link`.
+(`.xo` file) used by Vitis for U-series devices or by `tapa link`/SLASH for V80.
 
 **Shortcut:** `tapa compile` runs analyze, synth, and pack in the correct
 order in a single command. It does not floorplan — for that, run the steps
@@ -166,13 +166,13 @@ tapa compile --top VecAdd --part-num xcu250-figd2104-2L-e \
 
 ---
 
-## Note about v++ link
+## Hardware implementation
 
 ```admonish note
-The `v++ --link` step that produces `.xclbin` is performed by Xilinx Vitis,
-not TAPA. TAPA's output is the `.xo` file. See
-[Build & Run on Board](../howto/build-and-run.md) for the full linking
-workflow.
+For U-series devices, Xilinx Vitis performs `v++ --link` and produces an
+`.xclbin`. V80 uses the SLASH service-shell flow through `tapa link`, which
+consumes the XO and produces a `.vbin` for VRT. See
+[Build & Run on Board](../howto/build-and-run.md) for both workflows.
 ```
 
 ---

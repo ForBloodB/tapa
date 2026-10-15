@@ -394,6 +394,10 @@ fn publish_implementation_winner(
     Ok(())
 }
 
+#[allow(
+    clippy::too_many_lines,
+    reason = "the floorplan step keeps planning, optional DSE, and publication in one transaction"
+)]
 pub fn run(args: &FloorplanArgs, ctx: &CliContext) -> Result<()> {
     let options = PlanOptions {
         usage_limit: args.usage_limit,
@@ -422,13 +426,6 @@ pub fn run(args: &FloorplanArgs, ctx: &CliContext) -> Result<()> {
     let implementation_target = (args.run_impl || args.dse)
         .then(|| implementation::validate_target(&state, args.vivado_threads))
         .transpose()?;
-    let connectivity = read_connectivity(args.connectivity.as_deref())?;
-    if let Some(input) = &connectivity {
-        log::debug!(
-            "parsed {} memory-bank binding(s) from connectivity input",
-            input.bindings.len(),
-        );
-    }
 
     // Prepare the exact flattened RTL once. The parsed state is available to
     // derive interface-aware planner inputs before solving and is then reused
@@ -441,6 +438,26 @@ pub fn run(args: &FloorplanArgs, ctx: &CliContext) -> Result<()> {
     let interfaces = rtl_state
         .direct_mmap_interfaces(&flat.top)
         .map_err(|error| CliError::Floorplan(error.to_string()))?;
+    let connectivity = if state.flow.platform.as_deref() == Some("slash_v80_service") {
+        args.connectivity
+            .as_ref()
+            .map(|path| {
+                let bytes = fs_err::read(path)?;
+                let text = std::str::from_utf8(&bytes)
+                    .map_err(|error| CliError::InvalidArg(error.to_string()))?;
+                let ports = interfaces
+                    .iter()
+                    .map(|i| i.endpoint.top_port.as_str())
+                    .collect::<Vec<_>>();
+                let bindings =
+                    tapa_xilinx::connectivity::parse_slash_config(text, &flat.top, &ports)
+                        .map_err(CliError::InvalidArg)?;
+                Ok::<_, CliError>(ConnectivityInput { bytes, bindings })
+            })
+            .transpose()?
+    } else {
+        read_connectivity(args.connectivity.as_deref())?
+    };
     let mut inputs = memory_plan_inputs(&flat.top, &interfaces, connectivity.as_ref())?;
     inputs.control = rtl_state
         .supports_distributed_control()

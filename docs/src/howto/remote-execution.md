@@ -21,7 +21,8 @@ TAPA splits work between local and remote:
 |------|------------|
 | `tapa analyze` (runs `tapacc`) | Always local |
 | `tapa synth` (Vitis HLS synthesis) | Remote when `--remote-host` is set |
-| `tapa floorplan` with `--run-impl` or `--dse` (`v++ --link`) | Remote when `--remote-host` is set |
+| `tapa floorplan` with `--run-impl` or `--dse` (Vitis `v++ --link` or V80 SLASH) | Remote when `--remote-host` is set |
+| `tapa link` (SLASH service-shell implementation) | Remote when `--remote-host` is set |
 | `tapa pack` (IP packaging) | Remote when `--remote-host` is set |
 | File transfer (`.xo`, `.zip` artifacts) | Handled automatically by TAPA |
 

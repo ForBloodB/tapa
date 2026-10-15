@@ -1,5 +1,6 @@
 pub mod hls;
 pub mod package_xo;
+pub mod slash;
 pub mod vitis;
 pub mod vivado;
 

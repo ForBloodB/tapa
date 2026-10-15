@@ -116,7 +116,7 @@ Timing and resource-utilisation report, written unconditionally after `tapa synt
 
 **`floorplan.xdc`**
 
-Written by `tapa floorplan`. Contains the pblock definitions for every slot and pipeline stage, the pipeline-stage cell matches, and the reset-distribution timing cuts. `tapa pack` picks it up automatically once the floorplan marker is present in `tapa.json` and wires it into the generated bitstream script as `OPT_DESIGN.TCL.PRE`, so `v++ --link` applies it. See the [`tapa floorplan` CLI reference](cli.md#tapa-floorplan) for what it emits.
+Written by `tapa floorplan`. Contains the pblock definitions for every slot and pipeline stage, the pipeline-stage cell matches, and the reset-distribution timing cuts. U-series `tapa pack` picks it up for `v++ --link`; V80 `tapa link` passes it to SLASH as an implementation hook. See the [`tapa floorplan` CLI reference](cli.md#tapa-floorplan) for what it emits.
 
 **`floorplan-metrics.json` / `floorplan-timing.rpt`**
 

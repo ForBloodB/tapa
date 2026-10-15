@@ -88,7 +88,7 @@ Floorplanning helps when your design is **SLR-crossing-bound**: without it, Viva
 
 ### Running it with implementation feedback
 
-`tapa floorplan` can plan alone (fast — just writes constraints), or run the plan through `v++ --link` to measure the resulting Fmax:
+`tapa floorplan` can plan alone (fast — just writes constraints), or run the plan through the platform implementation backend to measure the resulting Fmax. U-series devices use `v++ --link`; V80 uses SLASH:
 
 ```bash
 tapa --work-dir work.out floorplan \

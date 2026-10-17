@@ -1,0 +1,804 @@
+//! The device model: a rows×cols grid of physical [`Slot`]s over a
+//! shell-subtracted AMD FPGA, plus the integer-rectangle [`Coor`] algebra the
+//! floorplan and routing ILPs run on.
+//!
+//! The model intentionally keeps only the coordinates and capacities needed by
+//! the placement and routing formulations:
+//!
+//! * We model **grid** coordinates only — a slot lives at `(x, y)` with
+//!   `x ∈ [0, cols)`, `y ∈ [0, rows)`, and a region is an inclusive rectangle
+//!   of them. Separate *physical tile* coordinates (including "unset"
+//!   sentinels) are not needed for the ILP, so [`Coor`] is `u32` and every
+//!   conversion into the `i64` centroid space is a lossless `From`.
+//! * Per-slot `area` is the resources **available** after the platform shell
+//!   is subtracted; the usage limit derates it further at ILP time.
+
+use serde::{Deserialize, Serialize};
+use tapa_ir::Area;
+
+pub use tapa_ir::floorplan::Coor;
+pub use tapa_ir::Resource;
+
+/// Horizontal grid spacing between adjacent slot centroids.
+pub const UNIT_DIST_X: i64 = 100;
+/// Vertical grid spacing — larger than [`UNIT_DIST_X`] to price in the cost of
+/// routing across an SLR (die) boundary.
+pub const UNIT_DIST_Y: i64 = 150;
+/// Multiplier applied to vertical (SLR-crossing) distance in the floorplan
+/// objective, so the ILP prefers to keep channels within a die.
+pub const VERTICAL_DIST_PENALTY: i64 = 2;
+/// Default per-slot resource utilization target.
+pub const DEFAULT_USAGE_LIMIT: f64 = 0.7;
+/// Sentinel "no limit" wire capacity: a boundary with this cap never binds.
+pub const WIRE_CAPACITY_INF: u64 = 100_000_000;
+
+/// Per-direction wire crossing capacities of a slot boundary.
+///
+/// An omitted direction defaults to [`WIRE_CAPACITY_INF`] — a boundary with no
+/// declared cap does not constrain routing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DirCaps {
+    #[serde(default = "wire_cap_inf")]
+    pub north: u64,
+    #[serde(default = "wire_cap_inf")]
+    pub south: u64,
+    #[serde(default = "wire_cap_inf")]
+    pub east: u64,
+    #[serde(default = "wire_cap_inf")]
+    pub west: u64,
+}
+
+fn wire_cap_inf() -> u64 {
+    WIRE_CAPACITY_INF
+}
+
+impl Default for DirCaps {
+    fn default() -> Self {
+        Self {
+            north: WIRE_CAPACITY_INF,
+            south: WIRE_CAPACITY_INF,
+            east: WIRE_CAPACITY_INF,
+            west: WIRE_CAPACITY_INF,
+        }
+    }
+}
+
+/// One physical slot on the device grid.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Slot {
+    /// Grid column, `0..cols`.
+    pub x: u32,
+    /// Grid row, `0..rows` (row = SLR).
+    pub y: u32,
+    /// Resources available in this slot after the platform shell.
+    pub area: Area,
+    /// Centroid abscissa in the `(UNIT_DIST_X, UNIT_DIST_Y)` metric space.
+    pub centroid_x: i64,
+    /// Centroid ordinate.
+    pub centroid_y: i64,
+    /// Vivado pblock range operations. A bare range is an implicit `-add` for
+    /// compatibility with simple device tables; shell-shaped slots may use
+    /// explicit `-add` and `-remove` clauses.
+    #[serde(default)]
+    pub pblock_ranges: Vec<String>,
+    /// Wire-crossing budget on each boundary.
+    #[serde(default)]
+    pub wire_cap: DirCaps,
+    /// Slot tags such as `HBM[0]`, `DDR[0]`, `CLK_RST`.
+    #[serde(default)]
+    pub tags: Vec<String>,
+}
+
+impl Slot {
+    /// This slot's one-cell [`Coor`].
+    #[must_use]
+    pub fn coor(&self) -> Coor {
+        Coor::slot(self.x, self.y)
+    }
+}
+
+/// Physical terminal location in the planner's quarter-unit metric.
+///
+/// The anchor remains tied to the slot carrying its tag; it refines wirelength
+/// cost without creating another placement region.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DeviceAnchor {
+    /// Exact terminal tag consumed by the placement graph.
+    pub tag: String,
+    /// Vivado site used to establish the terminal's physical location.
+    pub site: String,
+    /// Horizontal offset from the tagged slot centroid, in quarter units.
+    pub x_offset_quarters: i64,
+    /// Vertical offset from the tagged slot centroid, in quarter units.
+    pub y_offset_quarters: i64,
+}
+
+/// A precollected FPGA device: its grid, per-slot resources, and geometry.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Device {
+    /// Short key, e.g. `"u280"`.
+    pub key: String,
+    /// Full Vivado part number, e.g. `"xcu280-fsvh2892-2L-e"`.
+    pub part_num: String,
+    /// Vitis platform this table targets, when it is platform-specific.
+    #[serde(default)]
+    pub platform_name: Option<String>,
+    /// Number of grid rows (= SLRs).
+    pub rows: u32,
+    /// Number of grid columns.
+    pub cols: u32,
+    /// Whether this is a Versal part. Fixed NoC terminals may be anchored, but
+    /// the device model does not represent NoC topology or latency.
+    #[serde(default)]
+    pub is_versal: bool,
+    /// User pblock name the floorplan XDC scopes cells under, if any.
+    #[serde(default)]
+    pub user_pblock_name: Option<String>,
+    /// All slots, one per grid cell.
+    pub slots: Vec<Slot>,
+    /// Optional physical terminal locations that refine the centroid wire cost.
+    #[serde(default)]
+    pub anchors: Vec<DeviceAnchor>,
+}
+
+/// A semantic error in a parsed device table.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum DeviceValidationError {
+    /// An implementation pblock needs at least one physical range.
+    #[error("slot ({x},{y}) has no pblock ranges")]
+    MissingPblockRanges { x: u32, y: u32 },
+    /// A range operation cannot be passed safely and unambiguously to Vivado.
+    #[error("slot ({x},{y}) has invalid pblock range `{range}`")]
+    InvalidPblockRange { x: u32, y: u32, range: String },
+    /// The platform parent name is interpolated into generated Tcl.
+    #[error("invalid user pblock name `{0}`")]
+    InvalidUserPblockName(String),
+    /// The grid must have at least one row and one column.
+    #[error("device grid must have at least one row and one column")]
+    EmptyGrid,
+    /// A slot's coordinates are outside the declared grid.
+    #[error("slot ({x},{y}) is outside the {cols}x{rows} grid")]
+    SlotOutOfBounds {
+        /// Out-of-bounds column.
+        x: u32,
+        /// Out-of-bounds row.
+        y: u32,
+        /// Declared grid columns.
+        cols: u32,
+        /// Declared grid rows.
+        rows: u32,
+    },
+    /// Two slots claim the same grid cell.
+    #[error("grid cell ({x},{y}) has more than one slot")]
+    DuplicateSlot {
+        /// Column of the duplicated cell.
+        x: u32,
+        /// Row of the duplicated cell.
+        y: u32,
+    },
+    /// A grid cell has no slot. Sparse grids are not supported: real SSI
+    /// devices are complete rectangles of full-width SLR dies, and the
+    /// multilevel row pass and route candidate generation assume coverage.
+    #[error("grid cell ({x},{y}) has no slot; device grids must be complete rectangles")]
+    MissingSlot {
+        /// Column of the missing cell.
+        x: u32,
+        /// Row of the missing cell.
+        y: u32,
+    },
+    /// A slot centroid is off the unit-distance grid the placement objective
+    /// assumes.
+    #[error("slot ({x},{y}) centroid ({centroid_x},{centroid_y}) is off the unit grid")]
+    CentroidOffGrid {
+        /// Slot column.
+        x: u32,
+        /// Slot row.
+        y: u32,
+        /// Declared centroid x.
+        centroid_x: i64,
+        /// Declared centroid y.
+        centroid_y: i64,
+    },
+    /// The table models exact external banks but records no platform, so the
+    /// planner's platform check would silently no-op.
+    #[error("slot ({x},{y}) carries bank tag `{tag}` but the table has no platform_name")]
+    BankTagWithoutPlatform {
+        /// Slot column.
+        x: u32,
+        /// Slot row.
+        y: u32,
+        /// The bank tag requiring a platform.
+        tag: String,
+    },
+    /// A tag anchors placement to this slot, but the slot has no fabric for
+    /// the anchored logic to occupy.
+    #[error(
+        "slot ({x},{y}) carries tag `{tag}` but has no fabric; an anchor pins \
+         logic to its slot, so a slot with no capacity makes every plan \
+         infeasible — give the slot the resources the platform leaves it, or \
+         move the tag to the slot that borders the interface"
+    )]
+    AnchorTagWithoutCapacity {
+        /// Slot column.
+        x: u32,
+        /// Slot row.
+        y: u32,
+        /// The tag anchoring logic to an empty slot.
+        tag: String,
+    },
+    /// A physical anchor does not refer to a unique tag on this device.
+    #[error("physical anchor `{tag}` must match exactly one slot tag (found {matches})")]
+    InvalidAnchorTag {
+        /// The terminal tag the physical site represents.
+        tag: String,
+        /// Number of matching slots.
+        matches: usize,
+    },
+    /// The physical site string is not a plain Vivado site identifier.
+    #[error("physical anchor `{tag}` has invalid site name `{site}`")]
+    InvalidAnchorSite {
+        /// The terminal tag the physical site represents.
+        tag: String,
+        /// The unsafe or malformed site string.
+        site: String,
+    },
+    /// The normalized anchor lies outside the tagged slot's geometric extent.
+    #[error("physical anchor `{tag}` lies outside its tagged slot")]
+    AnchorOutsideSlot {
+        /// The terminal tag the physical site represents.
+        tag: String,
+    },
+}
+
+impl Device {
+    /// Whether the floorplanner should enforce this resource class.
+    /// 是否由 floorplanner 对该资源类别施加容量约束。
+    ///
+    /// V80's BRAM/URAM sites may appear in physical pblock ranges for Vivado
+    /// DFX legality, but they do not limit TAPA placement capacity.
+    /// V80 的 BRAM/URAM 站点可以列入 Vivado DFX 物理 pblock 范围，
+    /// 但不限制 TAPA 的 placement 容量预算。
+    #[must_use]
+    pub fn constrains_resource(&self, resource: Resource) -> bool {
+        !(self.key == "v80" && matches!(resource, Resource::Bram18k | Resource::Uram))
+    }
+
+    /// Validate the table values interpolated into implementation Tcl and the
+    /// structural grid invariants the planner relies on.
+    pub fn validate(&self) -> Result<(), DeviceValidationError> {
+        self.validate_grid()?;
+
+        // Exact bank anchors are platform-specific: a table that models them
+        // must record its platform or the planner's platform check no-ops.
+        if self.platform_name.is_none() {
+            for slot in &self.slots {
+                for tag in &slot.tags {
+                    if tag.parse::<tapa_ir::MemoryBank>().is_ok() {
+                        return Err(DeviceValidationError::BankTagWithoutPlatform {
+                            x: slot.x,
+                            y: slot.y,
+                            tag: tag.clone(),
+                        });
+                    }
+                }
+            }
+        }
+
+        self.validate_anchors()?;
+
+        // A tag is a placement anchor: the vertex that carries it can only go
+        // in the slot the tag names. An empty slot therefore does not mean
+        // "nothing is placed here" — it means nothing can be placed at all,
+        // and the ILP reports that as a generic infeasibility far from the
+        // cause.
+        for slot in &self.slots {
+            if slot.area != tapa_ir::Area::default() {
+                continue;
+            }
+            if let Some(tag) = slot.tags.first() {
+                return Err(DeviceValidationError::AnchorTagWithoutCapacity {
+                    x: slot.x,
+                    y: slot.y,
+                    tag: tag.clone(),
+                });
+            }
+        }
+
+        for slot in &self.slots {
+            if slot.pblock_ranges.is_empty() {
+                return Err(DeviceValidationError::MissingPblockRanges {
+                    x: slot.x,
+                    y: slot.y,
+                });
+            }
+            for range in &slot.pblock_ranges {
+                if !valid_pblock_range(range) {
+                    return Err(DeviceValidationError::InvalidPblockRange {
+                        x: slot.x,
+                        y: slot.y,
+                        range: range.clone(),
+                    });
+                }
+            }
+        }
+
+        if let Some(name) = &self.user_pblock_name {
+            let mut characters = name.chars();
+            let valid_first = characters
+                .next()
+                .is_some_and(|character| character.is_ascii_alphabetic() || character == '_');
+            if !valid_first
+                || name.starts_with("__")
+                || !characters
+                    .all(|character| character.is_ascii_alphanumeric() || character == '_')
+            {
+                return Err(DeviceValidationError::InvalidUserPblockName(name.clone()));
+            }
+        }
+
+        Ok(())
+    }
+
+    fn validate_grid(&self) -> Result<(), DeviceValidationError> {
+        // The grid must be a complete rectangle: exactly one in-bounds slot
+        // per (x, y).
+        if self.rows == 0 || self.cols == 0 {
+            return Err(DeviceValidationError::EmptyGrid);
+        }
+        let mut seen = std::collections::BTreeSet::new();
+        for slot in &self.slots {
+            if slot.x >= self.cols || slot.y >= self.rows {
+                return Err(DeviceValidationError::SlotOutOfBounds {
+                    x: slot.x,
+                    y: slot.y,
+                    cols: self.cols,
+                    rows: self.rows,
+                });
+            }
+            if !seen.insert((slot.x, slot.y)) {
+                return Err(DeviceValidationError::DuplicateSlot {
+                    x: slot.x,
+                    y: slot.y,
+                });
+            }
+        }
+        let expected = usize::try_from(u64::from(self.rows) * u64::from(self.cols))
+            .expect("grid size fits usize");
+        if seen.len() != expected {
+            let (x, y) = (0..self.rows)
+                .flat_map(|y| (0..self.cols).map(move |x| (x, y)))
+                .find(|cell| !seen.contains(cell))
+                .expect("a shorter seen set implies a missing cell");
+            return Err(DeviceValidationError::MissingSlot { x, y });
+        }
+
+        // Centroids must follow the unit grid the placement objective prices
+        // distances in.
+        for slot in &self.slots {
+            let expected = (
+                UNIT_DIST_X * i64::from(slot.x),
+                UNIT_DIST_Y * i64::from(slot.y),
+            );
+            if (slot.centroid_x, slot.centroid_y) != expected {
+                return Err(DeviceValidationError::CentroidOffGrid {
+                    x: slot.x,
+                    y: slot.y,
+                    centroid_x: slot.centroid_x,
+                    centroid_y: slot.centroid_y,
+                });
+            }
+        }
+
+        Ok(())
+    }
+
+    fn validate_anchors(&self) -> Result<(), DeviceValidationError> {
+        let mut anchor_tags = std::collections::BTreeSet::new();
+        for anchor in &self.anchors {
+            let matches = self
+                .slots
+                .iter()
+                .filter(|slot| slot.tags.iter().any(|tag| tag == &anchor.tag))
+                .count();
+            if matches != 1 || !anchor_tags.insert(anchor.tag.as_str()) {
+                return Err(DeviceValidationError::InvalidAnchorTag {
+                    tag: anchor.tag.clone(),
+                    matches,
+                });
+            }
+            if !valid_site_name(&anchor.site) {
+                return Err(DeviceValidationError::InvalidAnchorSite {
+                    tag: anchor.tag.clone(),
+                    site: anchor.site.clone(),
+                });
+            }
+            if anchor.x_offset_quarters.unsigned_abs() > (2 * UNIT_DIST_X) as u64
+                || anchor.y_offset_quarters.unsigned_abs() > (2 * UNIT_DIST_Y) as u64
+            {
+                return Err(DeviceValidationError::AnchorOutsideSlot {
+                    tag: anchor.tag.clone(),
+                });
+            }
+        }
+        Ok(())
+    }
+
+    /// The slot at grid `(x, y)`, if it exists.
+    #[must_use]
+    pub fn slot(&self, x: u32, y: u32) -> Option<&Slot> {
+        self.slots.iter().find(|s| s.x == x && s.y == y)
+    }
+
+    /// All slots carrying an exact device tag such as `HBM[7]` or
+    /// `S_AXI_CONTROL`.
+    pub fn slots_with_tag<'a>(&'a self, tag: &'a str) -> impl Iterator<Item = &'a Slot> + 'a {
+        self.slots
+            .iter()
+            .filter(move |slot| slot.tags.iter().any(|candidate| candidate == tag))
+    }
+
+    /// Physical anchor location in quarter units of the centroid metric.
+    /// Returns `None` when the tag has no explicit site anchor.
+    #[must_use]
+    pub fn anchor_position_quarters(&self, tag: &str) -> Option<(i64, i64)> {
+        let anchor = self.anchors.iter().find(|anchor| anchor.tag == tag)?;
+        let slot = self.slots_with_tag(tag).next()?;
+        Some((
+            slot.centroid_x * 4 + anchor.x_offset_quarters,
+            slot.centroid_y * 4 + anchor.y_offset_quarters,
+        ))
+    }
+
+    /// The summed resources of every slot in a region. `None` if any covered
+    /// cell has no slot, or if the table's own areas sum past `u64`.
+    #[must_use]
+    pub fn island_area(&self, region: &Coor) -> Option<Area> {
+        let mut total = Area::default();
+        for (x, y) in region.all_slot_coors() {
+            let slot = self.slot(x, y)?;
+            total = total.checked_add(slot.area)?;
+        }
+        Some(total)
+    }
+}
+
+fn valid_pblock_range(range: &str) -> bool {
+    if range.trim() != range
+        || range.is_empty()
+        || range
+            .chars()
+            .any(|character| character.is_control() || matches!(character, ';' | '$' | '[' | ']'))
+    {
+        return false;
+    }
+
+    let payload = if let Some(payload) = range.strip_prefix("-add ") {
+        payload
+    } else if let Some(payload) = range.strip_prefix("-remove ") {
+        payload
+    } else if range.starts_with('-') {
+        return false;
+    } else {
+        range
+    };
+    if payload.is_empty() {
+        return false;
+    }
+
+    let payload = if let Some(payload) = payload.strip_prefix('{') {
+        let Some(payload) = payload.strip_suffix('}') else {
+            return false;
+        };
+        payload
+    } else if payload.ends_with('}') {
+        return false;
+    } else {
+        payload
+    };
+    !payload.is_empty()
+        && payload.split_ascii_whitespace().all(|item| {
+            item.contains("_X")
+                && item.contains('Y')
+                && item.chars().all(|character| {
+                    character.is_ascii_alphanumeric() || matches!(character, '_' | ':')
+                })
+        })
+}
+
+fn valid_site_name(site: &str) -> bool {
+    site.starts_with("NOC_")
+        && site
+            .chars()
+            .all(|character| character.is_ascii_alphanumeric() || character == '_')
+}
+
+/// Return 70% of the raw wire capacity, rounded to the nearest integer (ties up).
+///
+/// Division-first: `raw / 10 * 7 + ((raw % 10) * 7 + 5) / 10` is the exact
+/// round-half-up of `(raw * 7 + 5) / 10` (with `raw = 10q + r`, both forms
+/// equal `7q + (7r + 5) / 10`), but never overflows `u64` for huge inputs.
+#[must_use]
+pub(crate) fn usable_wire_capacity(raw: u64) -> u64 {
+    raw / 10 * 7 + ((raw % 10) * 7 + 5) / 10
+}
+
+/// The usable capacity of the shared border between two facing slot sides,
+/// or `None` when neither facing side declares a limit.
+///
+/// The *smaller* of the two facing declarations is taken first — either side
+/// of the physical boundary may be the binding one — and the result is
+/// derated to its usable share. This is the single boundedness test the
+/// placement cuts and the routing MILP share: a boundary that constrains
+/// one stage constrains the other, and neither stage infers
+/// "unconstrained" from a merely large number.
+pub(crate) fn bounded_border_capacity(lhs: u64, rhs: u64) -> Option<u64> {
+    (lhs.min(rhs) < WIRE_CAPACITY_INF).then(|| usable_wire_capacity(lhs.min(rhs)))
+}
+
+#[cfg(test)]
+mod tests {
+
+    #[test]
+    fn usable_wire_capacity_rounds_half_up() {
+        assert_eq!(usable_wire_capacity(45), 32, "31.5 rounds up to 32");
+        assert_eq!(usable_wire_capacity(44), 31, "30.8 rounds to 31");
+        assert_eq!(usable_wire_capacity(15), 11, "10.5 rounds up to 11");
+        assert_eq!(usable_wire_capacity(0), 0, "0 stays 0");
+    }
+
+    /// The multiply-first form `(raw * 7 + 5) / 10` panics on overflow for
+    /// huge raw capacities in debug builds; the division-first form must not.
+    #[test]
+    fn usable_wire_capacity_does_not_overflow_near_u64_max() {
+        let raw = u64::MAX;
+        // raw = 10q + 5 with q = 1_844_674_407_370_955_161, so the exact
+        // round-half-up is 7q + (7*5 + 5)/10 = 7q + 4.
+        assert_eq!(usable_wire_capacity(raw), 7 * 1_844_674_407_370_955_161 + 4,);
+        assert_eq!(
+            usable_wire_capacity(u64::MAX - 1),
+            7 * 1_844_674_407_370_955_161 + 3
+        );
+    }
+
+    #[test]
+    fn bounded_border_capacity_takes_the_minimum_then_derates() {
+        assert_eq!(
+            bounded_border_capacity(100, 1),
+            Some(1),
+            "min(100, 1) * 0.7"
+        );
+        assert_eq!(bounded_border_capacity(1, 100), Some(1));
+        assert_eq!(bounded_border_capacity(10, 10), Some(7));
+        assert_eq!(
+            bounded_border_capacity(WIRE_CAPACITY_INF, 0),
+            Some(0),
+            "one unconstrained side does not lift the other side's zero",
+        );
+        assert_eq!(
+            bounded_border_capacity(WIRE_CAPACITY_INF, WIRE_CAPACITY_INF),
+            None,
+            "two unconstrained sides mean no bound at all",
+        );
+    }
+    use super::*;
+
+    /// A 2×2 device with centroids on the `(100, 150)` grid, used for the
+    /// geometry tests.
+    fn grid_2x2() -> Device {
+        let slot = |x: u32, y: u32, lut: u64| Slot {
+            x,
+            y,
+            area: Area {
+                lut,
+                ff: 0,
+                bram_18k: 0,
+                dsp: 0,
+                uram: 0,
+            },
+            centroid_x: UNIT_DIST_X * i64::from(x),
+            centroid_y: UNIT_DIST_Y * i64::from(y),
+            pblock_ranges: vec!["CLOCKREGION_X0Y0:CLOCKREGION_X0Y0".to_string()],
+            wire_cap: DirCaps::default(),
+            tags: Vec::new(),
+        };
+        Device {
+            key: "toy".to_string(),
+            part_num: "xctoy".to_string(),
+            platform_name: None,
+            rows: 2,
+            cols: 2,
+            is_versal: false,
+            user_pblock_name: None,
+            anchors: Vec::new(),
+            slots: vec![
+                slot(0, 0, 10),
+                slot(1, 0, 20),
+                slot(0, 1, 30),
+                slot(1, 1, 40),
+            ],
+        }
+    }
+
+    #[test]
+    fn island_area_sums_covered_slots() {
+        let device = grid_2x2();
+        // 10 + 20 + 30 + 40 across the whole grid.
+        assert_eq!(
+            device.island_area(&Coor::span(0, 0, 1, 1)).map(|a| a.lut),
+            Some(100),
+        );
+        assert_eq!(
+            device.island_area(&Coor::slot(0, 1)).map(|a| a.lut),
+            Some(30),
+        );
+    }
+
+    #[test]
+    fn wire_caps_default_to_infinite() {
+        assert_eq!(DirCaps::default().north, WIRE_CAPACITY_INF);
+        let partial: DirCaps = serde_json::from_str(r#"{"north": 11520}"#).expect("parse");
+        assert_eq!(partial.north, 11520);
+        assert_eq!(
+            partial.south, WIRE_CAPACITY_INF,
+            "omitted caps are infinite"
+        );
+    }
+
+    #[test]
+    fn device_validation_accepts_explicit_range_operations() {
+        let mut device = grid_2x2();
+        device.user_pblock_name = Some("pblock_dynamic_region".to_string());
+        device.slots[0].pblock_ranges = vec![
+            "-add {CLOCKREGION_X0Y0:CLOCKREGION_X3Y3}".to_string(),
+            "-remove CLOCKREGION_X2Y0:CLOCKREGION_X3Y3".to_string(),
+        ];
+        device.validate().expect("valid device table");
+    }
+
+    #[test]
+    fn device_validation_requires_a_complete_rectangle_grid() {
+        grid_2x2().validate().expect("the 2x2 toy is complete");
+
+        // One cell missing: sparse grids are not supported.
+        let mut sparse = grid_2x2();
+        sparse.slots.retain(|slot| (slot.x, slot.y) != (1, 1));
+        assert_eq!(
+            sparse.validate(),
+            Err(DeviceValidationError::MissingSlot { x: 1, y: 1 })
+        );
+
+        // Two slots on one cell.
+        let mut duplicated = grid_2x2();
+        let extra = duplicated.slots[0].clone();
+        duplicated.slots.push(extra);
+        assert_eq!(
+            duplicated.validate(),
+            Err(DeviceValidationError::DuplicateSlot { x: 0, y: 0 })
+        );
+
+        // A slot outside the declared grid.
+        let mut out_of_bounds = grid_2x2();
+        out_of_bounds.slots[3].x = 2;
+        assert_eq!(
+            out_of_bounds.validate(),
+            Err(DeviceValidationError::SlotOutOfBounds {
+                x: 2,
+                y: 1,
+                cols: 2,
+                rows: 2,
+            })
+        );
+
+        // Degenerate dimensions.
+        let mut empty = grid_2x2();
+        empty.cols = 0;
+        assert_eq!(empty.validate(), Err(DeviceValidationError::EmptyGrid));
+    }
+
+    #[test]
+    fn device_validation_rejects_anchor_offsets_outside_the_slot() {
+        let mut device = grid_2x2();
+        device.slots[0].tags.push("PORT".to_string());
+        device.anchors.push(DeviceAnchor {
+            tag: "PORT".to_string(),
+            site: "NOC_NMU512_X0Y0".to_string(),
+            x_offset_quarters: i64::MIN,
+            y_offset_quarters: 0,
+        });
+
+        assert_eq!(
+            device.validate(),
+            Err(DeviceValidationError::AnchorOutsideSlot {
+                tag: "PORT".to_string(),
+            })
+        );
+    }
+
+    #[test]
+    fn device_validation_requires_unit_grid_centroids() {
+        let mut device = grid_2x2();
+        device.slots[1].centroid_y = UNIT_DIST_Y;
+        assert!(matches!(
+            device.validate(),
+            Err(DeviceValidationError::CentroidOffGrid { x: 1, y: 0, .. })
+        ));
+    }
+
+    #[test]
+    fn device_validation_requires_a_platform_for_bank_tags() {
+        let mut device = grid_2x2();
+        device.slots[0].tags.push("DDR[0]".to_string());
+        assert_eq!(
+            device.validate(),
+            Err(DeviceValidationError::BankTagWithoutPlatform {
+                x: 0,
+                y: 0,
+                tag: "DDR[0]".to_string(),
+            })
+        );
+
+        device.platform_name = Some("shell".to_string());
+        device
+            .validate()
+            .expect("a recorded platform satisfies the rule");
+
+        // Non-bank tags never require a platform.
+        let mut device = grid_2x2();
+        device.slots[0].tags.push("CLK_RST".to_string());
+        device.slots[0].tags.push("HBM".to_string());
+        device
+            .validate()
+            .expect("SLR markers and control tags are not banks");
+    }
+
+    /// An anchor pins its vertex to the tagged slot and nowhere else, so a
+    /// tag on an empty slot is not "nothing goes here" — it is "nothing can be
+    /// placed", which the ILP would otherwise surface as a generic
+    /// infeasibility blaming wire capacity.
+    #[test]
+    fn device_validation_rejects_an_anchor_tag_on_an_empty_slot() {
+        let mut device = grid_2x2();
+        device.platform_name = Some("shell".to_string());
+        device.slots[0].area = tapa_ir::Area::default();
+        device.slots[0].tags.push("S_AXI_CONTROL".to_string());
+        assert_eq!(
+            device.validate(),
+            Err(DeviceValidationError::AnchorTagWithoutCapacity {
+                x: device.slots[0].x,
+                y: device.slots[0].y,
+                tag: "S_AXI_CONTROL".to_string(),
+            })
+        );
+
+        // An empty slot that anchors nothing is fine: it is simply fabric the
+        // platform kept, and the partitioner will never choose it.
+        device.slots[0].tags.clear();
+        device
+            .validate()
+            .expect("an untagged empty slot is a modelling fact, not an error");
+    }
+
+    #[test]
+    fn device_validation_rejects_unsafe_range_and_parent_tokens() {
+        let mut device = grid_2x2();
+        device.slots[0].pblock_ranges =
+            vec!["-add CLOCKREGION_X0Y0:CLOCKREGION_X3Y3; puts bad".to_string()];
+        assert!(matches!(
+            device.validate(),
+            Err(DeviceValidationError::InvalidPblockRange { x: 0, y: 0, .. })
+        ));
+
+        let mut device = grid_2x2();
+        device.user_pblock_name = Some("bad parent".to_string());
+        assert_eq!(
+            device.validate(),
+            Err(DeviceValidationError::InvalidUserPblockName(
+                "bad parent".to_string()
+            ))
+        );
+    }
+}

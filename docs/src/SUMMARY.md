@@ -24,6 +24,7 @@
 - [Parallel RTL Emulation](howto/parallel-rtl-emulation.md)
 - [Vitis Cosimulation](howto/vitis-cosim.md)
 - [Build & Run on Board](howto/build-and-run.md)
+- [V80 Validation with vadd and Callipepla](howto/v80-vadd-callipepla.md)
 - [Remote Execution](howto/remote-execution.md)
 - [Performance Tuning](howto/performance-tuning.md)
 

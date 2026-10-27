@@ -3,6 +3,11 @@
 This guide records the end-to-end TAPA flow used to validate the experimental
 V80 backend with the `vadd` and Callipepla examples.
 
+Use the checked-in application sources unchanged when validating backend
+fixes. Record the source revision, HLS target, implementation clocks, and
+software or RTL comparisons with each hardware result. Results obtained by
+rewriting an application do not establish support for the original source.
+
 ## Requirements
 
 Use Vitis HLS and Vivado 2025.1, CBC on `PATH`, and a SLASH `slashkit` build
@@ -44,8 +49,41 @@ Repeat the same stages for Callipepla, using top `Callipepla`, source
 that maps its memory ports to the V80 service shell. Keep each example's
 working directory and output paths separate.
 
+Use the same SLASH connectivity file for planning, packing, and linking. For
+example, `vadd.cfg` declares `nk=VecAdd:1:VecAdd_0` and maps the physical port
+with `sp=VecAdd_0.m_axi_a:HBM0`. See the
+[connectivity reference](../reference/cli.md#connectivity-file) for a complete example.
+
 The final link output is a SLASH `.vbin`. Check the Vivado timing report and
 the produced image before programming the board.
+
+Before placement, the linker checks optimized RM URAM use against the shell's
+actual sites and assigns the RM's HBM SmartConnect bridges to SLR2, next to
+their fixed NoC terminals. This also applies without a TAPA floorplan. The
+optional floorplan constraints are applied in the same placement hook; neither
+hook changes the static shell or relaxes its clocks.
+
+V80 SLR assignments target each task or pipeline-stage hierarchy root once.
+They do not repeat the assignment on internal RAM modules: nested assignments
+can make Vivado report twice the actual URAM demand during placement. Crossing
+pipeline registers retain their separate `USER_SLL_REG` constraints. A passing
+resource check or placement is not a timing result; compare setup and hold for
+all clocks after routing, using the original clock periods and timing exceptions.
+
+## RTL Cosimulation
+
+Run the XO with the same FPGA part used for HLS. XO cosimulation does not
+recover the part number from the package; without an override, xsim uses
+`xc7a100tcsg324-1`. This matters for V80 floating-point primitive models.
+
+```bash
+./vadd --bitstream build/vadd/kernel.xo -cosim_simulator xsim \
+  -xsim_part_num xcv80-lsva4737-2MHP-e-S \
+  -cosim_work_dir build/vadd/cosim 4097
+```
+
+Use the same part override for the Callipepla host. Bazel's xsim tests set
+`FRT_XSIM_PART_NUM` through their test environment.
 
 ## Board Validation
 

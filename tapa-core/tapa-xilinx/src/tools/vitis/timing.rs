@@ -33,9 +33,14 @@ pub(crate) fn parse_kernel_timing_summary(
     target_mhz: Option<u32>,
 ) -> Result<KernelTiming> {
     let kernel_clock = identify_kernel_clock(report, target_mhz)?;
+    parse_kernel_timing_for_clock(report, &kernel_clock)
+}
 
-    let clock_row = unique_clock_row(report, "Clock Summary", &kernel_clock)?;
-    let intra_row = unique_clock_row(report, "Intra Clock Table", &kernel_clock)?;
+/// Parse a platform's explicitly named kernel clock without selecting an
+/// unrelated platform clock at the same frequency.
+pub(crate) fn parse_kernel_timing_for_clock(report: &str, clock: &str) -> Result<KernelTiming> {
+    let clock_row = unique_clock_row(report, "Clock Summary", clock)?;
+    let intra_row = unique_clock_row(report, "Intra Clock Table", clock)?;
 
     let reported_target_period_ns =
         positive_finite("kernel Period(ns)", parse_field(&clock_row, "Period(ns)")?)?;

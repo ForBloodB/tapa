@@ -4,7 +4,7 @@ use camino::Utf8PathBuf;
 use regex::Regex;
 use std::path::Path;
 
-use crate::tools::vitis::timing::KernelTiming;
+use crate::tools::vitis::timing::{parse_kernel_timing_for_clock, KernelTiming};
 
 use crate::error::{Result, XilinxError};
 use crate::runtime::process::{ToolInvocation, ToolRunner};
@@ -83,14 +83,21 @@ pub fn link(runner: &dyn ToolRunner, job: &SlashLinkJob) -> Result<SlashLinkOutp
     // The implementation project is retained on the tool host. Verification
     // runs there too, so remote linking need not download the Vivado project.
     invocation.downloads = vec![output.clone(), Utf8PathBuf::from(format!("{output}.prj"))];
-    if let Some(xdc) = &job.floorplan_xdc {
-        let xdc = crate::util::absolutize(xdc);
-        let hook = work.join("slash_floorplan.tcl");
-        fs_err::write(&hook, pre_synth_hook(&xdc))?;
-        invocation
-            .args
-            .extend(["--pre-synth-tcls".into(), hook.to_string()]);
-        invocation.uploads.extend([xdc, hook]);
+    let xdc = job
+        .floorplan_xdc
+        .as_ref()
+        .map(|xdc| crate::util::absolutize(xdc));
+    let hook = work.join("slash_pre_synth.tcl");
+    let placement_hook = work.join("slash_pre_place.tcl");
+    fs_err::write(&placement_hook, pre_place_hook(xdc.as_ref()))?;
+    fs_err::write(&hook, pre_synth_hook(&placement_hook))?;
+    invocation
+        .args
+        .extend(["--pre-synth-tcls".into(), hook.to_string()]);
+    invocation.uploads.push(hook);
+    invocation.uploads.push(placement_hook);
+    if let Some(xdc) = xdc {
+        invocation.uploads.push(xdc);
     }
     let link_output = run_output(runner, &invocation)?;
 
@@ -123,13 +130,24 @@ pub fn link(runner: &dyn ToolRunner, job: &SlashLinkJob) -> Result<SlashLinkOutp
     })
 }
 
-fn pre_synth_hook(floorplan_xdc: &Utf8PathBuf) -> String {
+fn pre_place_hook(floorplan_xdc: Option<&Utf8PathBuf>) -> String {
+    let mut hook = include_str!("pre_place.tcl").to_owned();
+    if let Some(xdc) = floorplan_xdc {
+        // Floorplan diagnostics use Tcl control flow, not plain XDC syntax.
+        hook.push_str("\nsource {");
+        hook.push_str(xdc.as_str());
+        hook.push_str("}\n");
+    }
+    hook
+}
+
+fn pre_synth_hook(placement_hook: &Utf8PathBuf) -> String {
     format!(
-        "# TAPA floorplan.xdc is a Tcl implementation hook, not a plain XDC file.\n\
-         # Vivado's XDC parser rejects the control-flow diagnostics it contains.\n\
-         # Static OPT_DESIGN sees the reconfigurable module only as a black box.\n\
-         # Apply cell constraints after the RM is linked and before placement.\n\
-         set_property STEPS.PLACE_DESIGN.TCL.PRE [list {{{floorplan_xdc}}}] [get_runs impl_1]\n\
+        "# Apply netlist constraints after the RM is linked, before placement.\n\
+         set_property STEPS.PLACE_DESIGN.TCL.PRE [list {{{placement_hook}}}] [get_runs impl_1]\n\
+         # Keep the standard place_design invocation used to validate the\n\
+         # V80 hierarchy constraints; retain the strategy's other steps.\n\
+         set_property STEPS.PLACE_DESIGN.ARGS.SUBDIRECTIVE {{}} [get_runs impl_1]\n\
          # VRT reserves the first 64 KiB of the service-shell control aperture.\n\
          set tapa_kernel_cells [get_bd_cells -hier -filter {{VLNV =~ \"tapa:xrtl:*\"}}]\n\
          if {{[llength $tapa_kernel_cells] != 1}} {{ error \"TAPA V80 link requires exactly one TAPA kernel, found [llength $tapa_kernel_cells]\" }}\n\
@@ -223,7 +241,7 @@ fn parse_timing(report: &str, clock_hz: u64) -> Result<KernelTiming> {
     }
     let requested_mhz = f64::from(u32::try_from(requested_mhz).expect("checked above"));
     let row = Regex::new(
-        r"(?m)WNS\(ns\)\s+TNS\(ns\).*?\n\s*-+\s*\n\s*([-+0-9.]+)\s+([-+0-9.]+)\s+\d+\s+\d+\s+([-+0-9.]+)\s+([-+0-9.]+)",
+        r"(?m)WNS\(ns\)\s+TNS\(ns\).*?\n[ \t-]+\r?\n\s*([-+0-9.]+)\s+([-+0-9.]+)\s+\d+\s+\d+\s+([-+0-9.]+)\s+([-+0-9.]+)",
     )
     .expect("static SLASH timing expression");
     let captures = row.captures(report).ok_or_else(|| {
@@ -252,31 +270,39 @@ fn parse_timing(report: &str, clock_hz: u64) -> Result<KernelTiming> {
             "SLASH timing failed at {requested_mhz:.0} MHz: WNS={wns}, TNS={tns}, WHS={whs}, THS={ths}"
         )));
     }
-    let period = 1000.0 / requested_mhz;
-    let achieved_period = period - wns;
-    if achieved_period <= 0.0 {
-        return Err(XilinxError::TimingSummaryParse(
-            "SLASH achieved period is not positive".into(),
-        ));
-    }
-    Ok(KernelTiming {
-        reported_target_period_ns: period,
-        reported_target_mhz: requested_mhz,
-        wns_ns: wns,
-        achieved_period_ns: achieved_period,
-        fmax_mhz: 1000.0 / achieved_period,
-    })
+    parse_kernel_timing_for_clock(report, "user_clk")
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{pre_synth_hook, resolve_executable};
+    use super::{
+        link, parse_timing, pre_place_hook, pre_synth_hook, resolve_executable, SlashLinkJob,
+    };
+    use crate::runtime::process::{MockToolRunner, ToolOutput};
     use camino::Utf8PathBuf;
 
     #[test]
+    fn routed_timing_uses_user_clock_and_rejects_platform_setup_or_hold_failures() {
+        // Unmodified summary/clock-table excerpt from the Vivado 2025.1
+        // V80 vadd implementation; platform clocks also run at 100 MHz.
+        let report = include_str!("../../../../testdata/golden/v80-timing.rpt");
+        let timing = parse_timing(report, 100_000_000).expect("real routed report");
+        assert!((timing.reported_target_period_ns - 10.0).abs() < 1e-9);
+        assert!((timing.reported_target_mhz - 100.0).abs() < 1e-9);
+        assert!((timing.wns_ns - 3.135).abs() < 1e-9);
+        assert!((timing.fmax_mhz - 1000.0 / 6.865).abs() < 1e-9);
+        for (from, to) in [("0.006", "-0.006"), ("0.021", "-0.021")] {
+            let failing = report.replacen(from, to, 1);
+            let error = parse_timing(&failing, 100_000_000).expect_err("platform timing failure");
+            assert!(error.to_string().contains("SLASH timing failed"));
+        }
+    }
+
+    #[test]
     fn v80_pre_synth_hook_reassigns_the_real_kernel_control_segment() {
-        let hook = pre_synth_hook(&Utf8PathBuf::from("/tmp/floorplan.xdc"));
+        let hook = pre_synth_hook(&Utf8PathBuf::from("/tmp/slash_pre_place.tcl"));
         assert!(hook.contains("STEPS.PLACE_DESIGN.TCL.PRE"));
+        assert!(hook.contains("STEPS.PLACE_DESIGN.ARGS.SUBDIRECTIVE {} [get_runs impl_1]"));
         assert!(!hook.contains("STEPS.OPT_DESIGN.TCL.PRE"));
         assert!(hook.contains("get_bd_cells -hier -filter {VLNV =~ \"tapa:xrtl:*\"}"));
         assert!(hook.contains("get_property RANGE $tapa_control_seg"));
@@ -287,6 +313,51 @@ mod tests {
         assert!(hook.contains("SEG_[get_property NAME $tapa_kernel_cell]_reg0"));
         assert!(hook.contains("get_property OFFSET [lindex $tapa_mapped_segments 0]"));
         assert!(hook.contains("if {$tapa_actual_offset != 0x020200010000}"));
+        let placement = pre_place_hook(Some(&Utf8PathBuf::from("/tmp/floorplan.xdc")));
+        assert!(placement.ends_with("source {/tmp/floorplan.xdc}\n"));
+        assert!(placement.contains("set_property USER_SLR_ASSIGNMENT SLR2 $tapa_hbm_bridges"));
+    }
+
+    #[test]
+    fn link_without_floorplan_still_reserves_service_shell_control_addresses() {
+        let dir = tempfile::tempdir().expect("temporary link directory");
+        let work = Utf8PathBuf::from_path_buf(dir.path().to_path_buf()).expect("UTF-8 path");
+        let runner = MockToolRunner::new();
+        runner.push_ok("python3", ToolOutput::default());
+        runner.push_failure("/bin/sh", 1, "stop after inspecting SLASH invocation");
+        let job = SlashLinkJob {
+            xo: work.join("kernel.xo"),
+            config: work.join("connectivity.cfg"),
+            output: work.join("kernel.vbin"),
+            work_dir: work.join("link"),
+            slashkit: "/bin/sh".to_string(),
+            vivado: "/bin/sh".to_string(),
+            jobs: 1,
+            clock_hz: 100_000_000,
+            floorplan_xdc: None,
+        };
+        let error = link(&runner, &job).expect_err("mock stops before implementation");
+        assert!(error
+            .to_string()
+            .contains("stop after inspecting SLASH invocation"));
+        let calls = runner.calls();
+        let invocation = &calls[1];
+        let hook_path = invocation
+            .args
+            .windows(2)
+            .find(|args| args[0] == "--pre-synth-tcls")
+            .expect("SLASH always receives the service-shell ABI hook");
+        let hook = std::fs::read_to_string(&hook_path[1]).expect("generated hook");
+        assert!(invocation.uploads.iter().any(|path| path == &hook_path[1]));
+        assert!(hook.contains("assign_bd_address -offset 0x020200010000"));
+        assert!(hook.contains("if {$tapa_actual_offset != 0x020200010000}"));
+        assert!(hook.contains("STEPS.PLACE_DESIGN.TCL.PRE"));
+        let placement_path = job.work_dir.join("slash_pre_place.tcl");
+        assert!(invocation.uploads.contains(&placement_path));
+        let placement = std::fs::read_to_string(placement_path).expect("placement hook");
+        assert!(!placement.contains("\nsource {"));
+        assert!(placement.contains("set_property USER_SLR_ASSIGNMENT SLR2 $tapa_hbm_bridges"));
+        assert!(placement.contains("if {$tapa_rm_uram_used > $tapa_rm_uram_capacity}"));
     }
 
     #[test]

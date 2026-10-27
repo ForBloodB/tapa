@@ -134,6 +134,10 @@ mod tests {
             ExecutionMode::of(Path::new("k.zip")).expect("zip"),
             ExecutionMode::Cosim
         );
+        assert_eq!(
+            ExecutionMode::of(Path::new("k.vbin")).expect("vbin"),
+            ExecutionMode::Vrt
+        );
     }
 
     #[test]

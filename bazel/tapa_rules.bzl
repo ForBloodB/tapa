@@ -278,7 +278,7 @@ tapa_reuse_work_dir_xo = rule(
     },
 )
 
-tapa_xo = rule(
+_tapa_xo = rule(
     implementation = _tapa_xo_impl,
     attrs = {
         "srcs": attr.label_list(allow_files = [".cpp"], mandatory = True),
@@ -326,3 +326,26 @@ tapa_xo = rule(
         ),
     },
 )
+
+def _part_family(part_num):
+    return part_num.lower().split("-")[0]
+
+def tapa_xo(name, **kwargs):
+    """Declares a synthesis target only for the configured test device.
+
+    A full `bazel test //...` discovers targets for several historical board
+    parts. Keep targets for the selected `XILINX_PART_NUM` compatible and let
+    Bazel skip targets that would synthesize for a different part family.
+
+    Args:
+        name: Name of the generated synthesis target.
+        **kwargs: Attributes passed through to the underlying `tapa_xo` rule.
+    """
+    selected_part = XILINX_PART_NUM
+    target_part = kwargs.get("part_num") or selected_part
+    compatible_with = kwargs.get("target_compatible_with") or []
+    if _part_family(target_part) != _part_family(selected_part):
+        if "@platforms//:incompatible" not in compatible_with:
+            compatible_with = compatible_with + ["@platforms//:incompatible"]
+    kwargs["target_compatible_with"] = compatible_with
+    _tapa_xo(name = name, **kwargs)

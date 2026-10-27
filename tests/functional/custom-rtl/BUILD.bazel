@@ -7,6 +7,7 @@
 load("@rules_cc//cc:defs.bzl", "cc_binary")
 load("@rules_shell//shell:sh_test.bzl", "sh_test")
 load("//bazel:tapa_rules.bzl", "tapa_xo")
+load("//bazel:test_rules.bzl", "tapa_xosim_test_env")
 
 sh_test(
     name = "custom-rtl-target",
@@ -26,6 +27,7 @@ sh_test(
         # library; stage it so the runtime can find it next to the binary.
         "//fpga-runtime:cargo_release_artifacts",
     ],
+    env = tapa_xosim_test_env(),
     tags = [
         "cpu:2",
     ],

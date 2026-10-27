@@ -342,9 +342,8 @@ ITERATION_LOOP:
       }
     }
     [[tapa::partition("complete", -1, 1)]] [[tapa::partition(
-        "complete", -1,
-        2)]] [[tapa::
-                   partition("complete", -1, 3)]] [[tapa::storage(
+        "complete", -1, 2)]] [[tapa::partition("complete", -1, 3)]]
+    [[tapa::storage(
         "RAM_1P",
         "LUTRAM")]] /**********************************************************************/
     /**************************  MERGING PARTIAL SORTS ********************/

@@ -92,6 +92,15 @@ If your system does not have the Xilinx Runtime (XRT) installed, you can
 modify the `HAS_XRT` variable in the `VARS.bzl` file to `False`. This
 will prevent the tests to fail due to the absence of XRT.
 
+Device-specific synthesis tests use `XILINX_PART_NUM` from `VARS.bzl` or
+`VARS.local.bzl` as the selected test device. Targets pinned to another part
+family are marked incompatible, so `bazel test //...` skips them. To test a
+different board, set `XILINX_PART_NUM` in `VARS.local.bzl` before running Bazel.
+Software-only device-model tests still cover every checked-in device table.
+V80 uses the SLASH/VRT flow, so Vitis XRT hardware-emulation tests are also
+skipped when `XILINX_PART_NUM` selects V80; the `.xo` cosimulation tests remain
+available.
+
 ## Build TAPA from Source
 
 To build TAPA, navigate to the root directory of the cloned repository and execute the following command:
@@ -102,6 +111,20 @@ bazel build //...
 
 This command compiles all TAPA targets, including the compiler, runtime
 library, and tests.
+
+Cargo-backed Bazel rules use an isolated Cargo cache by default. To reuse a
+populated cache for offline builds or tests, pass `CARGO_HOME` explicitly to
+the relevant Bazel action or test environment and set Cargo offline mode:
+
+```bash
+bazel test //... \
+  --action_env=CARGO_HOME="$HOME/.cargo" \
+  --action_env=CARGO_NET_OFFLINE=true \
+  --host_action_env=CARGO_HOME="$HOME/.cargo" \
+  --host_action_env=CARGO_NET_OFFLINE=true \
+  --test_env=CARGO_HOME="$HOME/.cargo" \
+  --test_env=CARGO_NET_OFFLINE=true
+```
 
 For building a specific target, replace `//...` with the desired target
 name. For instance, to build only the TAPA compiler:

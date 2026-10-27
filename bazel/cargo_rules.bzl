@@ -44,7 +44,7 @@ OUTPUT_DIR="$(dirname "$FIRST_OUTPUT")"
 WORK_DIR="$OUTPUT_DIR/.{work_name}.cargo-work"
 rm -rf "$WORK_DIR"
 mkdir -p "$WORK_DIR"
-export CARGO_HOME="$WORK_DIR/cargo-home"
+export CARGO_HOME="${{CARGO_HOME:-$WORK_DIR/cargo-home}}"
 export CARGO_TARGET_DIR="$WORK_DIR/cargo-target"
 
 "$CARGO" build --manifest-path "$MANIFEST" --release --locked {build_args}
@@ -118,7 +118,7 @@ RUSTDOC_BIN_DIR="$(cd "$(dirname "$RUSTDOC")" && pwd)"
 export RUSTC
 export RUSTDOC
 export PATH="$RUST_BIN_DIR:$RUSTC_BIN_DIR:$RUSTDOC_BIN_DIR:/usr/bin:/bin"
-export CARGO_HOME="${{TEST_TMPDIR}}/cargo-home"
+export CARGO_HOME="${{CARGO_HOME:-${{TEST_TMPDIR}}/cargo-home}}"
 export CARGO_TARGET_DIR="${{TEST_TMPDIR}}/cargo-target"
 {env_exports}
 {env_file_exports}
@@ -236,6 +236,7 @@ def _cargo_artifacts_impl(ctx):
         tools = [ctx.file._cargo, ctx.file._rustc, script],
         executable = script,
         mnemonic = "CargoArtifacts",
+        use_default_shell_env = True,
         execution_requirements = _exec_requirements(ctx),
     )
     return DefaultInfo(files = depset(outputs))
@@ -298,6 +299,7 @@ def _cargo_platform_artifacts_impl(ctx):
         tools = [ctx.file._cargo, ctx.file._rustc, script],
         executable = script,
         mnemonic = "CargoPlatformArtifacts",
+        use_default_shell_env = True,
         execution_requirements = _exec_requirements(ctx),
     )
     return DefaultInfo(files = depset(outputs))

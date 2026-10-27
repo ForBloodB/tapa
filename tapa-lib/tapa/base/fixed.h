@@ -320,11 +320,11 @@ class fixed_base {
   uint64_t to_uint64() const { return static_cast<uint64_t>(to_int64()); }
   int length() const { return W; }
 
-#define TAPA_FIXED_COMPOUND(op)             \
-  template <typename T>                     \
-  fixed_base& operator op##=(const T & x) { \
-    *this = *this op x;                     \
-    return *this;                           \
+#define TAPA_FIXED_COMPOUND(op)              \
+  template <typename T>                      \
+  fixed_base& operator op## = (const T& x) { \
+    *this = *this op x;                      \
+    return *this;                            \
   }
   TAPA_FIXED_COMPOUND(+)
   TAPA_FIXED_COMPOUND(-)

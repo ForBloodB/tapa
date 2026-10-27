@@ -104,24 +104,24 @@ struct vec_t : protected std::array<T, N> {
     return *this;
   }
 
-#define TAPA_VEC_DEFINE_OP(op)                           \
-  template <typename T2>                                 \
-  vec_t<T, N>& operator op##=(const vec_t<T2, N>& rhs) { \
-    TAPA_VEC_INLINE;                                     \
-    for (size_type i = 0; i < N; ++i) {                  \
-      TAPA_VEC_UNROLL;                                   \
-      set(i, get(i) op rhs[i]);                          \
-    }                                                    \
-    return *this;                                        \
-  }                                                      \
-  template <typename T2>                                 \
-  vec_t<T, N>& operator op##=(const T2 & rhs) {          \
-    TAPA_VEC_INLINE;                                     \
-    for (size_type i = 0; i < N; ++i) {                  \
-      TAPA_VEC_UNROLL;                                   \
-      set(i, get(i) op rhs);                             \
-    }                                                    \
-    return *this;                                        \
+#define TAPA_VEC_DEFINE_OP(op)                             \
+  template <typename T2>                                   \
+  vec_t<T, N>& operator op## = (const vec_t<T2, N>& rhs) { \
+    TAPA_VEC_INLINE;                                       \
+    for (size_type i = 0; i < N; ++i) {                    \
+      TAPA_VEC_UNROLL;                                     \
+      set(i, get(i) op rhs[i]);                            \
+    }                                                      \
+    return *this;                                          \
+  }                                                        \
+  template <typename T2>                                   \
+  vec_t<T, N>& operator op## = (const T2& rhs) {           \
+    TAPA_VEC_INLINE;                                       \
+    for (size_type i = 0; i < N; ++i) {                    \
+      TAPA_VEC_UNROLL;                                     \
+      set(i, get(i) op rhs);                               \
+    }                                                      \
+    return *this;                                          \
   }
   TAPA_VEC_DEFINE_OP(+)
   TAPA_VEC_DEFINE_OP(-)
@@ -165,7 +165,7 @@ struct vec_t : protected std::array<T, N> {
     return result;                                         \
   }                                                        \
   template <typename T2>                                   \
-  vec_t<T, N> operator op(const T2 & rhs) const {          \
+  vec_t<T, N> operator op(const T2& rhs) const {           \
     TAPA_VEC_INLINE;                                       \
     vec_t<T, N> result;                                    \
     for (size_type i = 0; i < N; ++i) {                    \
@@ -311,17 +311,17 @@ using enable_if_not_stream =
 
 }  // namespace internal
 
-#define TAPA_VEC_DEFINE_OP(op)                                      \
-  template <typename T, int N, typename T2,                         \
-            typename = internal::enable_if_not_stream<T2>>          \
-  vec_t<T, N> operator op(const T2 & lhs, const vec_t<T, N>& rhs) { \
-    TAPA_VEC_INLINE;                                                \
-    vec_t<T, N> result;                                             \
-    for (int i = 0; i < N; ++i) {                                   \
-      TAPA_VEC_UNROLL;                                              \
-      result.set(i, lhs op rhs[i]);                                 \
-    }                                                               \
-    return result;                                                  \
+#define TAPA_VEC_DEFINE_OP(op)                                     \
+  template <typename T, int N, typename T2,                        \
+            typename = internal::enable_if_not_stream<T2>>         \
+  vec_t<T, N> operator op(const T2& lhs, const vec_t<T, N>& rhs) { \
+    TAPA_VEC_INLINE;                                               \
+    vec_t<T, N> result;                                            \
+    for (int i = 0; i < N; ++i) {                                  \
+      TAPA_VEC_UNROLL;                                             \
+      result.set(i, lhs op rhs[i]);                                \
+    }                                                              \
+    return result;                                                 \
   }
 TAPA_VEC_DEFINE_OP(+)
 TAPA_VEC_DEFINE_OP(-)

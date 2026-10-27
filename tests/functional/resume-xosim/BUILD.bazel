@@ -5,6 +5,7 @@
 # RapidStream Contributor License Agreement.
 
 load("@rules_shell//shell:sh_test.bzl", "sh_test")
+load("//bazel:test_rules.bzl", "tapa_xosim_test_env")
 
 sh_test(
     name = "resume-xosim-test",
@@ -23,4 +24,5 @@ sh_test(
         "//tests/apps/vadd:vadd-host",
         "//tests/apps/vadd:vadd-xo",
     ],
+    env = tapa_xosim_test_env(),
 )

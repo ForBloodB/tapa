@@ -17,6 +17,7 @@ These variables are read by the host executable at startup.
 | `FRT_COSIM_YIELD` | `1` (enabled) | When enabled, the DPI layer calls `thread::yield_now()` on empty reads or full writes. Disable with `0` to busy-wait instead. |
 | `FRT_COSIM_TIMEOUT_SECONDS` | `0` (disabled) | Maximum wall-clock time for a fast-cosim simulator process. On expiry, TAPA terminates the simulator process group and reports a timeout. Set a positive integer to enable it. |
 | `FRT_XSIM_LEGACY` | `0` | Set to `1` to use the legacy xelab command-line format for older Vivado versions. |
+| `FRT_XSIM_PART_NUM` | Archive part, or `xc7a100tcsg324-1` | Target part override for xsim. HLS ZIP archives carry a part; XO loading does not recover it. Set this or `-xsim_part_num` to the HLS part for device-specific primitives. |
 | `FRT_XOCL_BDF` | (unset) | PCIe Bus:Device:Function for XRT/OpenCL device selection. Equivalent to the `-xocl_bdf` gflag. |
 | `TAPA_HOME` | (unset) | TAPA installation prefix, e.g. `/opt/tapa`. Only needed as an override: cosim normally finds its DPI libraries through the library path `tapa g++` links into the host binary. `install.sh` sets it for you (`/etc/profile.d/tapa.sh` for a system-wide install, your shell profile otherwise). Set it by hand if you relocated the installation or copied a host binary to a machine without it. |
 
@@ -46,7 +47,7 @@ These flags use single-dash prefix (e.g., `-cosim_work_dir`) because they are pa
 
 | Flag | Description |
 |------|-------------|
-| `-xsim_part_num <part>` | Target FPGA part number for simulation (e.g., `xcu55c-fsvh2892-2L-e`). |
+| `-xsim_part_num <part>` | Override the xsim target part (e.g., `xcv80-lsva4737-2MHP-e-S`). Use the HLS part for XO simulation; otherwise it falls back to `xc7a100tcsg324-1`. |
 | `-cosim_work_dir <dir>` | Persistent working directory for simulation artifacts. Without this flag, a temporary directory is used and deleted after the run. |
 | `-xsim_save_waveform` | Save simulation waveforms to a `.wdb` file in the work directory. Pair with `-cosim_work_dir`; without it, the temporary directory and all waveforms are deleted after the run. |
 | `-xsim_start_gui` | Open the Vivado GUI for interactive debugging during simulation. |

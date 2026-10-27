@@ -9,7 +9,7 @@ attributes.
 
 load("@rules_cc//cc:defs.bzl", "cc_binary")
 load("@rules_shell//shell:sh_test.bzl", "sh_test")
-load("@vars//:vars.bzl", "HAS_XRT", "XILINX_HW_EMU_PLATFORM")
+load("@vars//:vars.bzl", "HAS_XRT", "XILINX_HW_EMU_PLATFORM", "XILINX_PART_NUM")
 load("//bazel:tapa_rules.bzl", "tapa_xo")
 load("//bazel:v++_rules.bzl", "vpp_xclbin")
 
@@ -18,6 +18,8 @@ _CARGO_RELEASE_ARTIFACTS = "//fpga-runtime:cargo_release_artifacts"
 # Must name the same device as XILINX_PART_NUM, which is what the `.xo` these
 # targets link was synthesized for. See the note in VARS.bzl.
 _HW_EMU_PLATFORM = XILINX_HW_EMU_PLATFORM
+_IS_V80_TARGET = XILINX_PART_NUM.lower().split("-")[0] == "xcv80"
+_HAS_HW_EMU = HAS_XRT and not _IS_V80_TARGET
 
 # No vendor include path: host CPU simulation must be self-contained, which
 # is what proves the vendor-agnostic migration actually landed.
@@ -25,6 +27,12 @@ _HOST_DEPS = [
     "//tapa-lib:tapa-host",
     "@gflags",
 ]
+
+def tapa_xosim_test_env(extra = {}):
+    """Returns the XSIM test environment for the configured Xilinx part."""
+    env = {"FRT_XSIM_PART_NUM": XILINX_PART_NUM}
+    env.update(extra)
+    return env
 
 def tapa_app_test(
         name,
@@ -124,6 +132,7 @@ def tapa_app_test(
             xo_label,
             _CARGO_RELEASE_ARTIFACTS,
         ],
+        env = tapa_xosim_test_env(),
         tags = ["cpu:2"],
     )
 
@@ -144,7 +153,7 @@ def tapa_app_test(
             xclbin_label,
         ],
         tags = ["cpu:2"],
-        target_compatible_with = [] if HAS_XRT else ["@platforms//:incompatible"],
+        target_compatible_with = [] if _HAS_HW_EMU else ["@platforms//:incompatible"],
     )
 
     sh_test(
@@ -197,7 +206,7 @@ def tapa_app_test(
         name = "%s-hw-emu-xclbin" % name,
         platform_name = _HW_EMU_PLATFORM,
         target = "hw_emu",
-        target_compatible_with = [] if HAS_XRT else ["@platforms//:incompatible"],
+        target_compatible_with = [] if _HAS_HW_EMU else ["@platforms//:incompatible"],
         top_name = top_name,
         xo = xo_label,
     )
@@ -287,6 +296,7 @@ def tapa_functional_test(
             ":%s-xo" % name,
             _CARGO_RELEASE_ARTIFACTS,
         ],
+        env = tapa_xosim_test_env(),
         **xosim_kwargs
     )
 
@@ -350,6 +360,7 @@ def regression_xosim(name, xo, host_srcs, host_defines = [], hw_test_args = [], 
             xo,
             _CARGO_RELEASE_ARTIFACTS,
         ],
+        env = tapa_xosim_test_env(),
         tags = [
             "cpu:2",
             "manual",

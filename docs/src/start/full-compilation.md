@@ -94,6 +94,10 @@ SLASH/Vivado implementation. `tapa link` rejects an image that misses the
 requested clock. Run the resulting `.vbin` through VRT; the [board guide](../howto/build-and-run.md)
 shows the VRT host flags.
 
+The current SLASH service shell exposes SLR1 and SLR2 to the RM. SLR0 needs a
+static-shell rebuild that includes it in the DFX reconfigurable partition;
+the RM-side floorplan XDC cannot expand that partition.
+
 ## Stage 3 — Link to xclbin
 
 Use Vitis `v++` to link the `.xo` into a hardware bitstream. This step does

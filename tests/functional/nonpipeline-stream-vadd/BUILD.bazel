@@ -6,6 +6,7 @@
 
 load("@rules_shell//shell:sh_test.bzl", "sh_test")
 load("//bazel:tapa_rules.bzl", "tapa_xo")
+load("//bazel:test_rules.bzl", "tapa_xosim_test_env")
 
 sh_test(
     name = "nonpipeline-stream-vadd",
@@ -32,6 +33,7 @@ sh_test(
         "//fpga-runtime:cargo_release_artifacts",
         "//tests/apps/vadd:vadd-host",
     ],
+    env = tapa_xosim_test_env(),
     tags = [
         "cpu:2",
     ],

@@ -28,7 +28,7 @@ sh_test(
     name = "template-tasks-zipsim",
     size = "enormous",
     timeout = "moderate",
-    srcs = ["//bazel:xrt_env.sh"],
+    srcs = ["//bazel:v++_env.sh"],
     args = [
         "$(location template-tasks-host)",
         "--bitstream=$(location template-tasks-zip)",

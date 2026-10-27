@@ -243,11 +243,9 @@ l_rp:
       const auto end_32 = fifo_inst_in.read();
 
     computation:
-      [[tapa::dependence(
-          "local_C", "", "", "", 1,
-          "DEP_DIST_LOAD_STORE")]] [[tapa::
-                                         pipeline(1)]] [[tapa::tripcount(
-          1, 200)]] for (int j = start_32; j < end_32;) {
+      [[tapa::dependence("local_C", "", "", "", 1, "DEP_DIST_LOAD_STORE")]]
+      [[tapa::pipeline(1)]] [[tapa::tripcount(1, 200)]] for (int j = start_32;
+                                                             j < end_32;) {
         if (!fifo_aXvec.empty()) {
           MultXVec raxv;
           fifo_aXvec.try_read(raxv);

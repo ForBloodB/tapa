@@ -7,6 +7,7 @@
 load("@rules_cc//cc:defs.bzl", "cc_binary")
 load("@rules_shell//shell:sh_test.bzl", "sh_test")
 load("//bazel:tapa_rules.bzl", "tapa_xo")
+load("//bazel:test_rules.bzl", "tapa_xosim_test_env")
 
 sh_test(
     name = "cannon",
@@ -42,7 +43,7 @@ sh_test(
         ":scatter",
         "//fpga-runtime:cargo_release_artifacts",
     ],
-    env = {"TAPA_CONCURRENCY": "1"},
+    env = tapa_xosim_test_env({"TAPA_CONCURRENCY": "1"}),
     tags = ["cpu:8"],
 )
 
@@ -124,7 +125,7 @@ sh_test(
         ":scatter-4x4",
         "//fpga-runtime:cargo_release_artifacts",
     ],
-    env = {"TAPA_CONCURRENCY": "1"},
+    env = tapa_xosim_test_env({"TAPA_CONCURRENCY": "1"}),
     tags = [
         "cpu:20",
         "manual",

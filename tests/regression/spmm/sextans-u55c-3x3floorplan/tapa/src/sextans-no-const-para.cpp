@@ -292,12 +292,9 @@ l_rp:
     // float local_B[8/2][8][WINDOW_SIZE];
     // float local_B[8][WINDOW_SIZE];
     [[tapa::storage("RAM_2P", "BRAM", 2)]] [[tapa::partition(
-        "complete", -1,
-        1)]] [[tapa::partition("complete", -1,
-                               2)]] [[tapa::partition("cyclic",
-                                                      B_PARTITION_FACTOR,
-                                                      3)]] float
-        local_B[4 / 2][8][WINDOW_SIZE];
+        "complete", -1, 1)]] [[tapa::partition("complete", -1, 2)]]
+    [[tapa::partition("cyclic", B_PARTITION_FACTOR,
+                      3)]] float local_B[4 / 2][8][WINDOW_SIZE];
     // To avoid auto memory type inference, previously
     // PEG_Bmtx_local_B_RAM_AUTO_1R1W
     // #pragma HLS array_partition variable=local_B cyclic
@@ -450,10 +447,8 @@ l_rp:
       const auto end_32 = fifo_inst_in.read();
 
     computation:
-      [[tapa::dependence(
-          "local_C", "", "", "", 1,
-          "DEP_DIST_LOAD_STORE")]] [[tapa::
-                                         pipeline(1, "stp")]] [[tapa::tripcount(
+      [[tapa::dependence("local_C", "", "", "", 1, "DEP_DIST_LOAD_STORE")]]
+      [[tapa::pipeline(1, "stp")]] [[tapa::tripcount(
           1, 200)]] for (int j = start_32; j < end_32;) {
         bool nop_flag = false;
         for (int p = 0; p < 4; ++p) {

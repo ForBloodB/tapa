@@ -430,11 +430,9 @@ l_rp:
       const auto end_32 = fifo_inst_in.read();
 
     computation:
-      [[tapa::dependence(
-          "local_C", "", "", "", 1,
-          "DEP_DIST_LOAD_STORE")]] [[tapa::
-                                         pipeline(1)]] [[tapa::tripcount(
-          1, 200)]] for (int j = start_32; j < end_32;) {
+      [[tapa::dependence("local_C", "", "", "", 1, "DEP_DIST_LOAD_STORE")]]
+      [[tapa::pipeline(1)]] [[tapa::tripcount(1, 200)]] for (int j = start_32;
+                                                             j < end_32;) {
         if (!fifo_aXvec.empty()) {
           MultXVec raxv;
           fifo_aXvec.try_read(raxv);
@@ -821,10 +819,8 @@ rp:
     }
 
   comp1:
-    [[tapa::dependence(
-        "psum", "", "", "", 1,
-        "DEP_DIST_LOAD_STORE")]] [[tapa::pipeline(1)]] for (int i = 0, idx = 0;
-                                                            i < num_ite;) {
+    [[tapa::dependence("psum", "", "", "", 1, "DEP_DIST_LOAD_STORE")]]
+    [[tapa::pipeline(1)]] for (int i = 0, idx = 0; i < num_ite;) {
       // DEBUG
       bool tmp1 = q1.empty();
       bool tmp2 = q2.empty();
@@ -845,15 +841,9 @@ rp:
     }
 
   comp2:
-    [[tapa::dependence(
-        "psum", "", "", "", 1,
-        "DEP_DIST_LOAD_STORE")]] [[tapa::
-                                       pipeline(
-                                           1)]] for (int i =
-                                                         DEP_DIST_LOAD_STORE;
-                                                     i <
-                                                     DEP_DIST_LOAD_STORE * 8;
-                                                     ++i) {
+    [[tapa::dependence("psum", "", "", "", 1, "DEP_DIST_LOAD_STORE")]]
+    [[tapa::pipeline(1)]] for (int i = DEP_DIST_LOAD_STORE;
+                               i < DEP_DIST_LOAD_STORE * 8; ++i) {
       psum[0][i % DEP_DIST_LOAD_STORE] +=
           psum[i / DEP_DIST_LOAD_STORE][i % DEP_DIST_LOAD_STORE];
     }
@@ -909,10 +899,8 @@ rp:
     }
 
   comp1:
-    [[tapa::dependence(
-        "psum", "", "", "", 1,
-        "DEP_DIST_LOAD_STORE")]] [[tapa::pipeline(1)]] for (int i = 0, idx = 0;
-                                                            i < num_ite;) {
+    [[tapa::dependence("psum", "", "", "", 1, "DEP_DIST_LOAD_STORE")]]
+    [[tapa::pipeline(1)]] for (int i = 0, idx = 0; i < num_ite;) {
       if (!q1.empty()) {
         double_v8 v1;
         q1.try_read(v1);
@@ -928,15 +916,9 @@ rp:
     }
 
   comp2:
-    [[tapa::dependence(
-        "psum", "", "", "", 1,
-        "DEP_DIST_LOAD_STORE")]] [[tapa::
-                                       pipeline(
-                                           1)]] for (int i =
-                                                         DEP_DIST_LOAD_STORE;
-                                                     i <
-                                                     DEP_DIST_LOAD_STORE * 8;
-                                                     ++i) {
+    [[tapa::dependence("psum", "", "", "", 1, "DEP_DIST_LOAD_STORE")]]
+    [[tapa::pipeline(1)]] for (int i = DEP_DIST_LOAD_STORE;
+                               i < DEP_DIST_LOAD_STORE * 8; ++i) {
       psum[0][i % DEP_DIST_LOAD_STORE] +=
           psum[i / DEP_DIST_LOAD_STORE][i % DEP_DIST_LOAD_STORE];
     }
@@ -983,10 +965,8 @@ rp:
     }
 
   comp1:
-    [[tapa::dependence(
-        "psum", "", "", "", 1,
-        "DEP_DIST_LOAD_STORE")]] [[tapa::pipeline(1)]] for (int i = 0, idx = 0;
-                                                            i < num_ite;) {
+    [[tapa::dependence("psum", "", "", "", 1, "DEP_DIST_LOAD_STORE")]]
+    [[tapa::pipeline(1)]] for (int i = 0, idx = 0; i < num_ite;) {
       // DEBUG
       bool tmp1 = qr.empty();
       bool tmp2 = qz.empty();
@@ -1009,15 +989,9 @@ rp:
     }
 
   comp2:
-    [[tapa::dependence(
-        "psum", "", "", "", 1,
-        "DEP_DIST_LOAD_STORE")]] [[tapa::
-                                       pipeline(
-                                           1)]] for (int i =
-                                                         DEP_DIST_LOAD_STORE;
-                                                     i <
-                                                     DEP_DIST_LOAD_STORE * 8;
-                                                     ++i) {
+    [[tapa::dependence("psum", "", "", "", 1, "DEP_DIST_LOAD_STORE")]]
+    [[tapa::pipeline(1)]] for (int i = DEP_DIST_LOAD_STORE;
+                               i < DEP_DIST_LOAD_STORE * 8; ++i) {
       psum[0][i % DEP_DIST_LOAD_STORE] +=
           psum[i / DEP_DIST_LOAD_STORE][i % DEP_DIST_LOAD_STORE];
     }

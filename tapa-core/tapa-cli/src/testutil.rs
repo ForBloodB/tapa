@@ -17,6 +17,7 @@ pub fn mock_floorplan_result(device: &str, grid: (u32, u32)) -> FloorplanResult 
         grid,
         regions: BTreeMap::new(),
         routes: Vec::new(),
+        stream_fifo_depths: BTreeMap::new(),
         slot_usage: BTreeMap::new(),
     }
 }

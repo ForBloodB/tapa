@@ -350,6 +350,7 @@ fn rejection_kind(error: &PlanError) -> Option<RejectionKind> {
         | PlanError::Graph(_)
         | PlanError::Ilp(_)
         | PlanError::Pipeline(_)
+        | PlanError::LatencyBalance(_)
         | PlanError::BankTag { .. }
         | PlanError::PlatformRequired { .. }
         | PlanError::PlatformMismatch { .. }
@@ -377,11 +378,12 @@ pub fn maximum_realized_utilization(
 struct RealizedUtilization {
     logic: f64,
     block: f64,
+    unscaled_memory: f64,
 }
 
 impl RealizedUtilization {
     fn maximum(self) -> f64 {
-        self.logic.max(self.block)
+        self.logic.max(self.block).max(self.unscaled_memory)
     }
 
     fn binding_logic_cap_units(self, caps: ExactDseResourceCaps) -> u32 {
@@ -419,12 +421,6 @@ fn realized_utilization(
             ))
         })?;
         for resource in Resource::ALL {
-            if !device.constrains_resource(resource) {
-                // Hard-block inventory is reported, but not used as a V80
-                // floorplan gate; Vivado remains the physical authority.
-                // 硬块库存仍记录，但不作为 V80 floorplan 门槛；物理结果以 Vivado 为准。
-                continue;
-            }
             let used = resource.amount(usage);
             let available = resource.amount(&slot.area);
             if available == 0 {
@@ -439,6 +435,8 @@ fn realized_utilization(
             let ratio = resource_ratio(used, available);
             let group = if resource.is_logic() {
                 &mut utilization.logic
+            } else if device.resource_limit(resource, 0.0) > 0.0 {
+                &mut utilization.unscaled_memory
             } else {
                 &mut utilization.block
             };
@@ -509,6 +507,7 @@ mod tests {
             grid: (2, 3),
             regions: BTreeMap::new(),
             routes: Vec::new(),
+            stream_fifo_depths: BTreeMap::new(),
             slot_usage: BTreeMap::new(),
         };
         let candidates = candidates_from_sweep(vec![
@@ -660,7 +659,18 @@ mod tests {
         let block_bound = RealizedUtilization {
             logic: 0.4,
             block: 0.89,
+            ..RealizedUtilization::default()
         };
+        let memory_bound = RealizedUtilization {
+            logic: 0.4,
+            unscaled_memory: 1.0,
+            ..RealizedUtilization::default()
+        };
+        assert_eq!(
+            memory_bound.binding_logic_cap_units(caps),
+            utilization_units(0.4),
+        );
+        assert_eq!(memory_bound.maximum().to_bits(), 1.0_f64.to_bits());
         assert_eq!(
             block_bound.binding_logic_cap_units(caps),
             utilization_units(0.79),
@@ -683,6 +693,7 @@ mod tests {
                     RealizedUtilization {
                         logic: 0.55,
                         block: 0.0,
+                        ..RealizedUtilization::default()
                     },
                 )
             };
@@ -786,6 +797,7 @@ mod tests {
             grid: (device.cols, device.rows),
             regions: BTreeMap::new(),
             routes: Vec::new(),
+            stream_fifo_depths: BTreeMap::new(),
             slot_usage: BTreeMap::from([(
                 region,
                 Area {

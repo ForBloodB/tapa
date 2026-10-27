@@ -4,7 +4,7 @@ use crate::error::CodegenError;
 use crate::state::views::{DesignView, ModuleTable};
 use tapa_ir::floorplanned_fifo_storage_depth;
 
-use super::floorplans::stream_crossing_body_level;
+use super::floorplans::{stream_crossing_body_level, stream_fifo_depth};
 use tapa_protocol::{
     FIFO_READ_PORTS, FIFO_WRITE_PORTS, HANDSHAKE_CLK, HANDSHAKE_RST, ISTREAM_SUFFIXES,
     OSTREAM_SUFFIXES, STREAM_DATA_SUFFIXES, STREAM_PORT_DIRECTION,
@@ -271,6 +271,7 @@ pub fn instantiate_fifos(
             let width = resolve_fifo_width(design, modules, producer, &fifo_name)?;
             // A floorplanned cross-slot stream becomes a named Head/Body/Tail
             // pipeline; everything else stays a plain FIFO.
+            let depth = stream_fifo_depth(design.floorplan(), &fifo_name, depth)?;
             let crossing_level = stream_crossing_body_level(design.floorplan(), &fifo_name);
             let inst = build_internal_fifo_instance(
                 &fifo_name,

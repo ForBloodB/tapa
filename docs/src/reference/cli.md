@@ -172,9 +172,9 @@ Floorplanning needs a device table describing the slot grid and where each memor
 
 Any other part is rejected with `no floorplan device table matches ...`. The other steps (`analyze`, `synth`, `pack`) work on every part Vitis HLS supports; only floorplanning is restricted.
 
-Following TAPA's coarse-grained floorplan model (TRETS 2023, Section 4.1), this table uses one slot per physical SLR in a 1-column by 3-row grid. Its logic and DSP `area` values represent the capacity exposed to the SLASH reconfigurable module after applying `pblock_slash`; BRAM/URAM site counts are retained as inventory only and are not floorplan limits on V80. Vivado decides BRAM/URAM placement inside the SLASH shell. SLR0 has no TAPA RM placement region in the current shell. HBM ports are anchored to SLR2, while DDR and control ports are anchored to SLR1. The V80 XDC retains the SLR/NOC and logic/DSP ranges, omits explicit BRAM/URAM site ranges, and clips generated slot ranges to `pblock_slash`. The two SLR boundaries each have an 18,870-SLL capacity in the routed shell report.
+Following TAPA's coarse-grained floorplan model (TRETS 2023, Section 4.1), the V80 table uses one slot per physical SLR in a 1-column by 3-row grid. The current SLASH service shell exposes only SLR1 and SLR2 to the reconfigurable module (RM). SLR0 has zero modeled resource and crossing capacity; enabling it requires rebuilding the static shell with SLR0 inside the DFX reconfigurable partition. The RM-side floorplan XDC cannot expand that partition. V80 BRAM/URAM placement and generated FIFO resources must fit the full per-slot shell inventory; utilization targets and DSE derating do not reduce these memory capacities. Vivado still validates physical placement and cascading. HBM ports are anchored to SLR2, while DDR and control ports retain their routed SLR anchors. V80 placement uses `USER_SLR_ASSIGNMENT`; it does not create per-slot resource pblocks. The usable SLR1–SLR2 boundary has an 18,870-SLL capacity.
 
-The 64 `HBM[n]` tags name SLASH AXI endpoints (`HBM_AXI_00`–`HBM_AXI_63`); they are not a claim that V80 has 64 HBM pseudo-channels. AVED describes 32 pseudo-channels, while the exact endpoint-to-pseudo-channel pairing is a property of the installed SLASH service shell. AVED places the HBM_NMUs across the top of SLR2. The RM-side HBM terminal is therefore anchored in SLR2. The service-shell DDR and control terminals are anchored in the usable SLR1 RM slot; this keeps them out of static SLR0 and avoids an unnecessary SLR1-to-SLR2 hop. This table models the RM-side slot anchor and SLR crossing budget; it does not model HNoC/VNoC/NPS routes, NoC bandwidth, or per-bank NoC locality. Vivado/SLASH implements and times those hard-NoC paths.
+The 64 `HBM[n]` tags name SLASH AXI endpoints (`HBM_AXI_00`–`HBM_AXI_63`); they are not a claim that V80 has 64 HBM pseudo-channels. AVED describes 32 pseudo-channels, while the exact endpoint-to-pseudo-channel pairing is a property of the installed SLASH service shell. AVED places the HBM_NMUs across the top of SLR2, so the RM-side HBM terminals are anchored in SLR2. The routed service shell places `DDR[1]` in SLR1 and `DDR[0]`, `DDR[2]`, `DDR[3]`, and `S_AXI_CONTROL` in SLR2. This table models the RM-side slot anchor and SLR crossing budget; it does not model HNoC/VNoC/NPS routes, NoC bandwidth, or per-bank NoC locality. Vivado/SLASH implements and times those hard-NoC paths.
 
 ### Synthesizing with `--platform`, not `--part-num`
 
@@ -197,7 +197,16 @@ This applies to every floorplan run, not just the `--run-impl` and `--dse` flows
 | `--usage-limit FRAC` | Per-slot resource utilization target for a non-DSE plan; raised on infeasibility (default `0.7`). |
 | `--partition-strategy {auto,flat,multi-level}` | Placement schedule (default `auto`). `flat` places directly into atomic slots with one ILP; `multi-level` places into rows (SLRs) first, then refines into atomic slots. `auto` picks between them with a built-in heuristic. |
 | `--pp-scheme {single,double,single_h_double_v}` | How pipeline registers distribute across a crossing's route (default `double`). |
+| `--balance-latency` | Apply AutoBridge's weighted stream-latency balancing after routing. It may increase FIFO capacity to absorb pipeline-latency differences. Designs with a positive-latency stream cycle are rejected, matching the original difference-constraint model. |
 | `--max-seconds N` | ILP wall-clock limit in seconds (default `600`). |
+
+The latency-balancing pass models each stream's added crossing latency as a
+difference constraint between integer task potentials, then minimizes the sum
+of `stream width × added FIFO capacity`. The selected logical depths are saved
+in `tapa.json`, used by RTL generation, and included in resource validation.
+This Rust implementation follows the formulation in UCLA-VAST AutoBridge at
+[`2aebf536`](https://github.com/UCLA-VAST/AutoBridge/tree/2aebf5367d244ca4925c8b94d43c4266f7058d53); the placement and routing engines remain
+TAPA's Rust implementations.
 
 ### Connectivity file
 
@@ -222,11 +231,35 @@ sp=Bandwidth.chan[0]:DDR[0]
 sp=Bandwidth.chan[1]:DDR[1]
 ```
 
-The same `sp=` file feeds floorplanning and hardware linking. U-series devices pass it to `v++ --link`; V80 passes it through TAPA's SLASH adapter.
+The same connectivity file feeds floorplanning, packing, and hardware linking.
+U-series devices use the Vitis format above. V80 uses SLASH's kernel-instance
+and physical interface names; its planner resolves these against the compiled
+top ports. The V80 equivalent of the VecAdd mapping is:
+
+```ini
+[connectivity]
+shell=service
+nk=VecAdd:1:VecAdd_0
+sp=VecAdd_0.m_axi_a:HBM0
+sp=VecAdd_0.m_axi_b:HBM1
+sp=VecAdd_0.m_axi_c:HBM2
+
+[clock]
+krnl=VecAdd_0
+freqhz=100000000
+```
+
+V80 linking always places the kernel control registers after the service
+shell's reserved first 64 KiB, including when no floorplan is supplied.
 
 ### Optional flags (implementation / DSE)
 
 These run the floorplanned design through the device's implementation backend to measure Fmax. U-series devices use `v++ --link`; V80 uses SLASH to build the service-shell `.vbin`. They require a `xilinx-vitis` TAPA target, the exact platform used at synthesis, and Vivado plus either Vitis or SLASH on the tool host.
+
+The reported Fmax is a timing estimate, `1000 / (period_ns - WNS_ns)`,
+using the kernel clock's own rows. V80 uses `user_clk` and also requires
+nonnegative global setup and hold slack across all clocks. The estimate
+does not replace implementation at a higher requested frequency.
 
 | Flag | Description |
 |------|-------------|
@@ -238,10 +271,10 @@ These run the floorplanned design through the device's implementation backend to
 
 ### What the floorplan XDC emits
 
-`tapa floorplan` writes `floorplan.xdc`. U-series `pack`/`v++` sources it as `OPT_DESIGN.TCL.PRE`. V80's SLASH adapter runs it as `PLACE_DESIGN.TCL.PRE`: SLASH implements the kernel as a reconfigurable module, which is still a black box during static `OPT_DESIGN`; its cells become available for TAPA's placement constraints after the RM is linked. The adapter clips each slot pblock under `pblock_slash`. It contains:
+`tapa floorplan` writes `floorplan.xdc`. U-series `pack`/`v++` sources it as `OPT_DESIGN.TCL.PRE`. V80's SLASH adapter runs it as `PLACE_DESIGN.TCL.PRE`: SLASH implements the kernel as a reconfigurable module, which is still a black box during static `OPT_DESIGN`; its cells become available for TAPA's placement constraints after the RM is linked. It contains:
 
-- **Pblocks** for every slot and pipeline stage (`IS_SOFT 1`, `CONTAIN_ROUTING 0`). On DFX/shell platforms Vivado may force `IS_SOFT=0` for hierarchical-flow children — this is expected and is what drops routing congestion.
-- **Pipeline-stage cell matches** (`TAPA_HS_HEAD/BODY/TAIL`) constrained to their route cells, with `USER_SLL_REG` on vertical-boundary bodies.
+- **Placement constraints** for tasks and pipeline stages. U-series uses slot pblocks (`IS_SOFT 1`, `CONTAIN_ROUTING 0`), clipped to the platform's user pblock when present. V80 assigns hierarchies to SLR1 or SLR2 with `USER_SLR_ASSIGNMENT`, without creating slot pblocks or changing the static shell's partition.
+- **Pipeline-stage cell matches** (`TAPA_HS_HEAD/BODY/TAIL`) constrained to their route slots, with `USER_SLL_REG` on vertical-boundary bodies.
 - **Reset-distribution timing cuts**: `set_false_path` on the reset net (TAPA's `__tapa_control_fabric_reset_n` and the platform `peripheral_aresetn`), both `-quiet`. Reset deassertion is not a per-cycle setup concern; cutting it removes the dominant cross-SLR reset wall.
 
 ### Example

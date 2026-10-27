@@ -7,6 +7,7 @@ use tapa_ir::MemoryBank;
 use crate::device::select::SelectError;
 use crate::graph::GraphError;
 use crate::partition::ilp::IlpError;
+use crate::pipeline::latency::LatencyBalanceError;
 use crate::pipeline::plan::PipelineError;
 use crate::plan::PlanOptionsError;
 
@@ -34,6 +35,9 @@ pub enum PlanError {
     /// The pipeline plan (routing) failed.
     #[error(transparent)]
     Pipeline(#[from] PipelineError),
+    /// Stream latency balancing could not produce valid FIFO depths.
+    #[error(transparent)]
+    LatencyBalance(#[from] LatencyBalanceError),
     /// An external bank tag is absent or ambiguous in the selected device.
     #[error("memory bank `{bank}` maps to {matches} device slots; expected exactly one")]
     BankTag { bank: MemoryBank, matches: usize },

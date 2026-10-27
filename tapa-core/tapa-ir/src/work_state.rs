@@ -189,6 +189,7 @@ mod tests {
             grid: (2, 3),
             regions: BTreeMap::from([("Top".to_string(), "SLOT_X0Y0_TO_SLOT_X0Y0".to_string())]),
             routes: Vec::new(),
+            stream_fifo_depths: BTreeMap::new(),
             slot_usage: BTreeMap::from([(
                 "SLOT_X0Y0_TO_SLOT_X0Y0".to_string(),
                 Area {

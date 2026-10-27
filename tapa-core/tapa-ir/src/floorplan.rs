@@ -570,7 +570,7 @@ pub enum PipelineScheme {
 ///
 /// Stored in [`WorkState`](crate::WorkState) so it is resumable and
 /// inspectable in `tapa.json`; read by codegen and by XDC emission.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct FloorplanResult {
     /// Resolved device key, e.g. `"u280"`.
@@ -587,6 +587,10 @@ pub struct FloorplanResult {
     pub regions: BTreeMap<String, String>,
     /// One entry per pipelined channel.
     pub routes: Vec<PipelineRoute>,
+    /// Logical depths selected by optional stream latency balancing, keyed by
+    /// flattened FIFO name. Missing entries retain the source depth.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub stream_fifo_depths: BTreeMap<String, u32>,
     /// Achieved per-slot resource usage, including generated stream pipeline
     /// storage and registers; keyed by region tag for reporting and DRCs.
     pub slot_usage: BTreeMap<String, Area>,
@@ -823,6 +827,7 @@ mod tests {
                     reg_regions: vec!["SLOT_X0Y1".to_string()],
                 },
             ],
+            stream_fifo_depths: BTreeMap::new(),
             slot_usage: BTreeMap::from([(
                 "SLOT_X0Y0_TO_SLOT_X0Y0".to_string(),
                 Area {

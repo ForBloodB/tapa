@@ -20,9 +20,7 @@ use crate::partition::ilp::{
     floorplan_with_exact_resource_caps, floorplan_with_strategy, resolve_strategy, MAX_USAGE_LIMIT,
 };
 use crate::partition::PartitionStrategy;
-use crate::pipeline::plan::{
-    plan_routes, realize_slot_usage, realize_slot_usage_with_resource_caps,
-};
+use crate::pipeline::plan::{plan_routes, realize_slot_usage_with_resource_caps_and_depths};
 use crate::solver::{CbcSolver, SolveOpts};
 use crate::xdc;
 
@@ -86,26 +84,8 @@ pub fn plan_with_inputs(
     options: &PlanOptions,
     inputs: &PlanInputs,
 ) -> Result<FloorplanResult, PlanError> {
-    let retry_ceiling = v80_retry_ceiling(state, options);
+    let retry_ceiling = options.usage_limit.max(MAX_USAGE_LIMIT);
     plan_with_retry_ceiling(state, options, inputs, retry_ceiling)
-}
-
-/// V80's SLASH service-shell pblock has a discrete URAM constraint: the
-/// Callipepla kernel needs sixteen 32-URAM task instances, while the two
-/// usable SLR slots expose 216 and 328 URAM sites.  The aggregate 512 sites
-/// fit, but a 0.95 derating leaves only 205 and 311 sites, which cannot hold
-/// seven and nine instances.  V80 therefore uses the exact shell capacity;
-/// the table still contains the physical counts and Vivado remains the final
-/// placement/timing authority.
-fn v80_retry_ceiling(state: &WorkState, options: &PlanOptions) -> f64 {
-    let default_ceiling = options.usage_limit.max(MAX_USAGE_LIMIT);
-    state
-        .flow
-        .part_num
-        .as_deref()
-        .and_then(|part| select_device(part).ok())
-        .filter(|device| device.key == "v80")
-        .map_or(default_ceiling, |_| 1.0)
 }
 
 fn plan_with_retry_ceiling(
@@ -283,28 +263,42 @@ fn finish_plan(
         solver,
         opts,
     )?;
+    let stream_fifo_depths = if options.balance_latency {
+        crate::pipeline::latency::balance_stream_latencies(graph, &routes, solver, opts)?
+    } else {
+        std::collections::BTreeMap::new()
+    };
+    if options.balance_latency {
+        log::info!(
+            "latency balancing increased {} stream FIFO depths",
+            stream_fifo_depths.len()
+        );
+    }
     // Deliberate headroom: the relaxed `plan` path validates the *realized*
     // usage — placement plus pipeline registers — against the retry ceiling
     // (`MAX_USAGE_LIMIT`), not the cap the placement was found at, so a
     // placement at 0.6 may absorb registers up to the ceiling. The exact
     // DSE path validates against its per-candidate logic/block caps instead.
     let slot_usage = if realized_caps.multilevel_block_margin_applied {
-        realize_slot_usage_with_resource_caps(
+        realize_slot_usage_with_resource_caps_and_depths(
             graph,
             &assignment.regions,
             &assignment.slot_usage,
             &routes,
+            &stream_fifo_depths,
             device,
             realized_caps.logic_utilization_cap,
             realized_caps.effective_block_utilization_cap,
         )?
     } else {
-        realize_slot_usage(
+        realize_slot_usage_with_resource_caps_and_depths(
             graph,
             &assignment.regions,
             &assignment.slot_usage,
             &routes,
+            &stream_fifo_depths,
             device,
+            realized_caps.logic_utilization_cap,
             realized_caps.logic_utilization_cap,
         )?
     };
@@ -316,6 +310,7 @@ fn finish_plan(
         grid: (device.cols, device.rows),
         regions: assignment.regions,
         routes,
+        stream_fifo_depths,
         slot_usage,
     })
 }

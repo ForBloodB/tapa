@@ -21,10 +21,20 @@ fn verilator_bin() -> OsString {
 fn verilator_root() -> Option<std::path::PathBuf> {
     let bin = std::path::PathBuf::from(verilator_bin());
     let root = bin.parent()?.parent()?;
-    root.join("include")
-        .join("verilated.mk")
-        .exists()
-        .then(|| root.to_path_buf())
+    let include = root.join("include");
+    (include.join("verilated_std.sv").is_file()
+        && include.join("verilated_std_waiver.vlt").is_file())
+    .then(|| root.to_path_buf())
+}
+
+/// Build a command using the configured runfile and its include tree.
+pub fn verilator_command() -> Command {
+    let mut command = Command::new(verilator_bin());
+    command.env_remove("VERILATOR_BIN");
+    if let Some(root) = verilator_root() {
+        command.env("VERILATOR_ROOT", root);
+    }
+    command
 }
 
 /// Is verilator runnable? Cosim tests skip cleanly without it — unless
@@ -38,9 +48,8 @@ fn verilator_root() -> Option<std::path::PathBuf> {
 /// itself forever.
 pub fn available() -> bool {
     let configured = std::env::var_os("VERILATOR_BIN").is_some();
-    let ok = Command::new(verilator_bin())
+    let ok = verilator_command()
         .arg("--version")
-        .env_remove("VERILATOR_BIN")
         .output()
         .is_ok_and(|output| output.status.success());
     if !ok && configured {
@@ -116,11 +125,9 @@ pub fn run_cosim(
     args.extend(sources);
     args.push("tb.cpp".to_string());
 
-    let build = Command::new(verilator_bin())
+    let build = verilator_command()
         .current_dir(root)
         .args(&args)
-        .env_remove("VERILATOR_BIN")
-        .envs(verilator_root().map(|r| ("VERILATOR_ROOT", r)))
         .output()
         .expect("spawn verilator");
     assert!(

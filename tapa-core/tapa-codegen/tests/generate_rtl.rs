@@ -7,7 +7,6 @@ use common::{
     attach_basic_modules, design, handshake_module_src, narrow_axi_id_module_src, parse_module,
     plain, stream_consumer_module_src, stream_producer_module_src, task, wide_axi_id_module_src,
 };
-use std::process::Command;
 use tapa_codegen::generate_rtl;
 use tapa_codegen::rtl_state::TopologyWithRtl;
 
@@ -562,6 +561,7 @@ fn test_generate_rtl_floorplan_crossing_becomes_head_body_tail_pipeline() {
     let top_v = generate_floorplanned_stream_pipeline(
         tapa_ir::PipelineScheme::Double,
         vec!["SLOT_X0Y0", "SLOT_X0Y1"],
+        16,
     );
 
     check(
@@ -575,7 +575,8 @@ fn test_generate_rtl_floorplan_crossing_becomes_head_body_tail_pipeline() {
 
 #[test]
 fn test_generate_rtl_adjacent_single_crossing_keeps_head_and_tail() {
-    let top_v = generate_floorplanned_stream_pipeline(tapa_ir::PipelineScheme::Single, Vec::new());
+    let top_v =
+        generate_floorplanned_stream_pipeline(tapa_ir::PipelineScheme::Single, Vec::new(), 16);
 
     check(
         &top_v,
@@ -584,9 +585,20 @@ fn test_generate_rtl_adjacent_single_crossing_keeps_head_and_tail() {
     );
 }
 
+#[test]
+fn test_generate_rtl_uses_balanced_stream_fifo_depth() {
+    let top_v = generate_floorplanned_stream_pipeline(
+        tapa_ir::PipelineScheme::Double,
+        vec!["SLOT_X0Y0", "SLOT_X0Y1"],
+        24,
+    );
+    check(&top_v, &["tapa_hs_pipeline", ".DEPTH(24)"], &[]);
+}
+
 fn generate_floorplanned_stream_pipeline(
     scheme: tapa_ir::PipelineScheme,
     reg_regions: Vec<&str>,
+    logical_depth: u32,
 ) -> String {
     use std::collections::BTreeMap;
     use tapa_ir::{FloorplanResult, PipelineRoute, RoutedChannel};
@@ -625,6 +637,11 @@ fn generate_floorplanned_stream_pipeline(
             scheme,
             reg_regions: reg_regions.into_iter().map(str::to_string).collect(),
         }],
+        stream_fifo_depths: if logical_depth == 16 {
+            BTreeMap::new()
+        } else {
+            BTreeMap::from([("fifo_0".to_string(), logical_depth)])
+        },
         slot_usage: BTreeMap::new(),
     });
     attach_basic_modules(&mut state, &["top"]);
@@ -770,13 +787,14 @@ fn distributed_control_state() -> TopologyWithRtl {
                 reg_regions: vec!["SLOT_X1Y0".to_string(), "SLOT_X0Y0".to_string()],
             },
         ],
+        stream_fifo_depths: BTreeMap::new(),
         slot_usage: BTreeMap::new(),
     });
     state
 }
 
 fn lint_distributed_top(state: &TopologyWithRtl) {
-    if !Command::new("verilator")
+    if !common::verilator::verilator_command()
         .arg("--version")
         .output()
         .is_ok_and(|output| output.status.success())
@@ -800,7 +818,7 @@ fn lint_distributed_top(state: &TopologyWithRtl) {
         .expect("write child RTL");
     }
 
-    let lint = Command::new("verilator")
+    let lint = common::verilator::verilator_command()
         .current_dir(root)
         .args([
             "--lint-only",
@@ -1103,6 +1121,7 @@ fn direct_axi_state(routes: Option<Vec<tapa_ir::PipelineRoute>>) -> TopologyWith
             "SLOT_X0Y0_TO_SLOT_X0Y0".to_string(),
         )]),
         routes,
+        stream_fifo_depths: BTreeMap::new(),
         slot_usage: BTreeMap::new(),
     });
     state
@@ -1806,6 +1825,7 @@ fn async_mmap_state(floorplanned: bool) -> TopologyWithRtl {
                 ),
             ]),
             routes,
+            stream_fifo_depths: BTreeMap::new(),
             slot_usage: BTreeMap::new(),
         });
     }

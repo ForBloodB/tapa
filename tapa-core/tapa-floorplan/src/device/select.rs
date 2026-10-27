@@ -224,13 +224,12 @@ mod tests {
         }
     }
 
-    /// Capacities are from Vivado 2025.1 `report_utilization` on each child
-    /// pblock nested in `pblock_slash`; crossing budgets and RM NoC anchor
-    /// sites are from the routed DCP. HBM port sites are from the generated
-    /// SLASH static NoC configuration. Clock-region ranges keep all site
-    /// classes available to the RM while the parent pblock clips the shell
-    /// footprint. SLR0 has fabric, but `pblock_slash` does not cover it, so its
-    /// available slot capacity is zero.
+    /// Capacities come from the Vivado 2025.1 SLASH shell `PBlock`. Its
+    /// `pblock_slash` Slice ranges cover SLR1 and SLR2; SLR0 fabric is outside
+    /// the DFX reconfigurable partition. The SLR0-SLR1 cut therefore has no RM
+    /// crossing capacity until the static shell is rebuilt with that cut
+    /// inside the partition. BRAM/URAM values in the supported slots are hard
+    /// inventory limits as well as inputs to the soft resource-balance cost.
     ///
     /// Anchor offsets use the center of each site's Vivado `CLOCK_REGION`.
     /// Across the modeled ten CR columns, X offset is `40 * CR_X - 180`
@@ -247,7 +246,7 @@ mod tests {
         let slr0 = device.slot(0, 0).expect("SLR0 slot");
         assert_eq!(slr0.area, tapa_ir::Area::default());
         assert!(slr0.tags.is_empty());
-        assert_eq!(slr0.wire_cap.north, 18_870);
+        assert_eq!(slr0.wire_cap.north, 0);
         assert_eq!(slr0.pblock_ranges, ["CLOCKREGION_X0Y0:CLOCKREGION_X0Y0"]);
 
         let slr1 = device.slot(0, 1).expect("SLR1 slot");
@@ -255,15 +254,25 @@ mod tests {
         assert_eq!(slr1.area.ff, 259_520);
         assert_eq!(slr1.area.dsp, 752);
         assert_eq!(slr1.area.bram_18k, 408);
-        // The SLASH RM pblock exposes 216 URAM288 sites in SLR1:
-        // X1Y156:X7Y179 (168), X6Y144:X7Y155 (24), and
-        // X2Y144:X3Y155 (24).
-        assert_eq!(slr1.area.uram, 216);
-        // BRAM/URAM remain inventory data, not TAPA capacity constraints.
-        // BRAM/URAM 保留为库存数据，不作为 TAPA 容量约束。
-        assert!(!device.constrains_resource(tapa_ir::Resource::Bram18k));
-        assert!(!device.constrains_resource(tapa_ir::Resource::Uram));
-        assert!(device.constrains_resource(tapa_ir::Resource::Lut));
+        // Count the shell's URAM sites by their physical SLR, rather than
+        // inferring the SLR from resource-grid Y coordinates.
+        assert_eq!(slr1.area.uram, 96);
+        assert_eq!(
+            device
+                .resource_limit(tapa_ir::Resource::Bram18k, 0.7)
+                .to_bits(),
+            1.0_f64.to_bits()
+        );
+        assert_eq!(
+            device
+                .resource_limit(tapa_ir::Resource::Uram, 0.7)
+                .to_bits(),
+            1.0_f64.to_bits()
+        );
+        assert_eq!(
+            device.resource_limit(tapa_ir::Resource::Lut, 0.7).to_bits(),
+            0.7_f64.to_bits()
+        );
         assert_eq!(slr1.wire_cap.south, 18_870);
         assert_eq!(slr1.wire_cap.north, 18_870);
         assert_eq!(slr1.pblock_ranges, ["CLOCKREGION_X0Y5:CLOCKREGION_X9Y7"]);
@@ -273,9 +282,7 @@ mod tests {
         assert_eq!(slr2.area.ff, 1_415_616);
         assert_eq!(slr2.area.dsp, 3_120);
         assert_eq!(slr2.area.bram_18k, 1_950);
-        // SLR2 is restricted by the service shell to X0Y180:X7Y220:
-        // 8 columns * 41 rows = 328 URAM288 sites.
-        assert_eq!(slr2.area.uram, 328);
+        assert_eq!(slr2.area.uram, 496);
         assert_eq!(slr2.wire_cap.south, 18_870);
         assert_eq!(
             slr2.pblock_ranges,

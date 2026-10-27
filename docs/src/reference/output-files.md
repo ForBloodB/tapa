@@ -116,11 +116,11 @@ Timing and resource-utilisation report, written unconditionally after `tapa synt
 
 **`floorplan.xdc`**
 
-Written by `tapa floorplan`. Contains the pblock definitions for every slot and pipeline stage, the pipeline-stage cell matches, and the reset-distribution timing cuts. U-series `tapa pack` picks it up for `v++ --link`; V80 `tapa link` passes it to SLASH as an implementation hook. See the [`tapa floorplan` CLI reference](cli.md#tapa-floorplan) for what it emits.
+Written by `tapa floorplan`. Contains task and pipeline-stage placement constraints, pipeline-stage cell matches, and reset-distribution timing cuts. U-series uses slot pblocks, and `tapa pack` picks the file up for `v++ --link`. V80 uses `USER_SLR_ASSIGNMENT` within the service shell's existing SLR1/SLR2 partition, and `tapa link` passes the file to SLASH as an implementation hook. See the [`tapa floorplan` CLI reference](cli.md#tapa-floorplan) for what it emits.
 
 **`floorplan-metrics.json` / `floorplan-timing.rpt`**
 
-Written only when `tapa floorplan` runs an implementation (`--run-impl` or `--dse`). `floorplan-metrics.json` records the achieved kernel frequency and the utilization cap of the winning plan; `floorplan-timing.rpt` is the post-implementation timing report it came from.
+Written only when `tapa floorplan` runs an implementation (`--run-impl` or `--dse`). `floorplan-metrics.json` records the kernel Fmax estimate and the utilization cap of the winning plan; `floorplan-timing.rpt` is the post-implementation timing report it came from. Fmax is `1000 / (period_ns - WNS_ns)` for the kernel clock, `user_clk` on V80. V80 also checks global setup and hold timing across all clocks before accepting the result.
 
 **`dse/`**
 

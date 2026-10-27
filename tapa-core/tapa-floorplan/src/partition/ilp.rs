@@ -6,9 +6,9 @@
 //! * sparse `y[e][a][b]` binaries for the Cartesian product of the source and
 //!   destination candidate regions;
 //! * endpoint-coupling, resource, and guillotine-cut constraints; and
-//! * width-weighted, vertically penalized centroid distance as the sole
-//!   variable objective cost, refined by physical coordinates for tagged
-//!   terminals when the device table provides them.
+//! * width-weighted, vertically penalized centroid distance as the default
+//!   objective, refined by physical coordinates for tagged terminals when the
+//!   device table provides them; V80 first balances soft per-SLR resource load.
 //!
 //! After a successful solve, the achieved objective is pinned and a unique
 //! stable candidate ranking is minimized, so equal-cost optima resolve
@@ -219,8 +219,8 @@ pub(crate) fn floorplan_with_exact_resource_caps(
 fn exact_resource_cap_constraints(device: &Device, block_limit: f64) -> PlacementConstraints {
     let by_resource: BTreeMap<_, _> = Resource::ALL
         .into_iter()
-        .filter(|resource| device.constrains_resource(*resource) && !resource.is_logic())
-        .map(|resource| (resource, block_limit))
+        .filter(|resource| !resource.is_logic())
+        .map(|resource| (resource, device.resource_limit(resource, block_limit)))
         .collect();
     let max_resource_limits = row_regions(device)
         .into_iter()
@@ -672,9 +672,6 @@ fn describe_demand(
 ) -> String {
     let mut worst: Option<(Resource, u64, u64)> = None;
     for resource in Resource::ALL {
-        if !device.constrains_resource(resource) {
-            continue;
-        }
         let demand: u64 = graph
             .vertices()
             .iter()
@@ -685,7 +682,10 @@ fn describe_demand(
             .map(|(region, total)| {
                 let limit = lookup_limit(&constraints.max_resource_limits, region, resource)
                     .unwrap_or(usage_limit);
-                scaled_amount(resource.amount(total), limit)
+                scaled_amount(
+                    resource.amount(total),
+                    device.resource_limit(resource, limit),
+                )
             })
             .sum();
         if demand > supply
@@ -748,6 +748,7 @@ fn candidate_domains(
                 .get(&region)
                 .ok_or_else(|| IlpError::InvalidRegion(region.region_name()))?;
             let available = scaled_area_with_overrides(
+                device,
                 *total,
                 usage_limit,
                 &constraints.max_resource_limits,
@@ -755,7 +756,7 @@ fn candidate_domains(
             );
             // A zero-area vertex fits even on a slot whose derated area
             // scaled to zero (0 <= 0); only the fitting check decides.
-            if !area_fits_on_device(device, vertex.area, available) {
+            if !area_fits(vertex.area, available) {
                 continue;
             }
             candidates.push(region);
@@ -811,6 +812,7 @@ pub(crate) fn scaled_area(area: Area, limit: f64) -> Area {
 }
 
 fn scaled_area_with_overrides(
+    device: &Device,
     area: Area,
     default_limit: f64,
     limits: &RegionResourceLimits,
@@ -819,7 +821,10 @@ fn scaled_area_with_overrides(
     Area::from_amounts(|resource| {
         scaled_amount(
             resource.amount(&area),
-            lookup_limit(limits, region, resource).unwrap_or(default_limit),
+            device.resource_limit(
+                resource,
+                lookup_limit(limits, region, resource).unwrap_or(default_limit),
+            ),
         )
     })
 }
@@ -889,6 +894,7 @@ fn anchor_unplaceable_error(
             area_fits(
                 vertex.area,
                 scaled_area_with_overrides(
+                    device,
                     *total,
                     usage_limit,
                     &constraints.max_resource_limits,
@@ -913,6 +919,7 @@ fn anchor_unplaceable_error(
         .filter_map(|region| {
             areas.get(region).map(|total| {
                 scaled_area_with_overrides(
+                    device,
                     *total,
                     usage_limit,
                     &constraints.max_resource_limits,
@@ -942,13 +949,6 @@ fn component_max(a: Area, b: Area) -> Area {
 fn area_fits(required: Area, available: Area) -> bool {
     Resource::ALL
         .into_iter()
-        .all(|resource| resource.amount(&required) <= resource.amount(&available))
-}
-
-fn area_fits_on_device(device: &Device, required: Area, available: Area) -> bool {
-    Resource::ALL
-        .into_iter()
-        .filter(|resource| device.constrains_resource(*resource))
         .all(|resource| resource.amount(&required) <= resource.amount(&available))
 }
 
@@ -1015,6 +1015,10 @@ struct FloorplanModel {
     lp: LpModel,
     /// `x[vertex][candidate_index]`.
     x: Vec<Vec<LpVar>>,
+    /// V80's unbounded normalized resource-load objective; it is a cost, not a capacity row.
+    balance_objective: Option<LinExpr>,
+    /// The connectivity cost minimized after V80's soft load balance.
+    wire_objective: LinExpr,
 }
 
 impl FloorplanModel {
@@ -1052,8 +1056,22 @@ impl FloorplanModel {
             &y,
         )?;
         add_cut_constraints(&mut lp, graph, domains, cuts, &y);
-        add_objective(&mut lp, graph, device, domains, &y)?;
-        Ok(Self { lp, x })
+        let wire_objective = add_objective(graph, device, domains, &y)?;
+        let balance_objective = if device.key == "v80" {
+            let max_utilization = add_soft_resource_balance(&mut lp, graph, domains, areas, &x);
+            let objective = LinExpr::sum([(1.0, max_utilization)]);
+            lp.set_objective(objective.clone());
+            Some(objective)
+        } else {
+            lp.set_objective(wire_objective.clone());
+            None
+        };
+        Ok(Self {
+            lp,
+            x,
+            balance_objective,
+            wire_objective,
+        })
     }
 
     fn read_back(
@@ -1107,6 +1125,17 @@ impl FloorplanModel {
         opts: &SolveOpts,
         primary: &crate::solver::LpSolution,
     ) -> Result<Option<crate::solver::LpSolution>, IlpError> {
+        if let Some(balance_objective) = &self.balance_objective {
+            return Ok(crate::solver::lexicographic::refine_with_secondary(
+                &mut self.lp,
+                solver,
+                opts,
+                balance_objective.clone(),
+                primary.objective,
+                self.wire_objective.clone(),
+                &self.x,
+            )?);
+        }
         let pin = self.lp.objective.clone();
         Ok(crate::solver::lexicographic::refine(
             &mut self.lp,
@@ -1117,6 +1146,54 @@ impl FloorplanModel {
             &self.x,
         )?)
     }
+}
+
+/// Add an unbounded normalized-load objective without turning any block
+/// inventory into a placement feasibility constraint.
+fn add_soft_resource_balance(
+    lp: &mut LpModel,
+    graph: &FloorGraph,
+    domains: &[Vec<Coor>],
+    areas: &RegionAreas,
+    x: &[Vec<LpVar>],
+) -> LpVar {
+    let max_utilization = lp.add_continuous("soft_max_resource_utilization", 0.0, f64::INFINITY);
+    let active_regions: BTreeSet<Coor> = domains.iter().flatten().copied().collect();
+    for region in active_regions {
+        let capacity = areas[&region];
+        for resource in Resource::ALL {
+            let total = resource.amount(&capacity);
+            if total == 0 {
+                continue;
+            }
+            let mut load = SparseRow::new();
+            let mut has_load = false;
+            for (vertex_index, vertex) in graph.vertices().iter().enumerate() {
+                let amount = resource.amount(&vertex.area);
+                if amount == 0 {
+                    continue;
+                }
+                if let Some(candidate_index) = domains[vertex_index]
+                    .iter()
+                    .position(|candidate| *candidate == region)
+                {
+                    load.push(amount.as_f64(), x[vertex_index][candidate_index]);
+                    has_load = true;
+                }
+            }
+            if !has_load {
+                continue;
+            }
+            load.push(-total.as_f64(), max_utilization);
+            lp.add_constraint(
+                format!("soft_load_{}_{}", region.region_name(), resource.name()),
+                load.into_expr(),
+                Comparison::Le,
+                0.0,
+            );
+        }
+    }
+    max_utilization
 }
 
 /// Sparse `x[v][s]` binaries and redundant one-hot rows.
@@ -1295,11 +1372,6 @@ fn add_resource_constraints(
             .get(&region)
             .ok_or_else(|| IlpError::InvalidRegion(region.region_name()))?;
         for resource in Resource::ALL {
-            if !device.constrains_resource(resource) {
-                // V80 BRAM/URAM legality is delegated to Vivado.
-                // V80 的 BRAM/URAM 合法放置交由 Vivado 决定。
-                continue;
-            }
             let mut terms = SparseRow::new();
             for (vi, vertex) in graph.vertices().iter().enumerate() {
                 if let Some(ci) = domains[vi]
@@ -1318,7 +1390,11 @@ fn add_resource_constraints(
             // this row then rejects by a fraction of a unit.
             let limit = lookup_limit(&constraints.max_resource_limits, &region, resource)
                 .unwrap_or(usage_limit);
-            let max_rhs = scaled_amount(resource.amount(&total), limit).as_f64();
+            let max_rhs = scaled_amount(
+                resource.amount(&total),
+                device.resource_limit(resource, limit),
+            )
+            .as_f64();
             lp.add_constraint(
                 format!("node_{}_{}_usage", region.region_name(), resource.name()),
                 terms.into_expr(),
@@ -1406,12 +1482,11 @@ fn add_cut_constraints(
 /// Width-weighted adjusted distance between physical terminals and region
 /// centroids, plus the formulation's constant one.
 fn add_objective(
-    lp: &mut LpModel,
     graph: &FloorGraph,
     device: &Device,
     domains: &[Vec<Coor>],
     y: &[Vec<Vec<LpVar>>],
-) -> Result<(), IlpError> {
+) -> Result<LinExpr, IlpError> {
     // Region centroids repeat across every incident edge; resolve once.
     let centroids: std::collections::BTreeMap<Coor, (i64, i64)> = domains
         .iter()
@@ -1437,8 +1512,7 @@ fn add_objective(
             objective.push(coefficient, term.var(y));
         }
     }
-    lp.set_objective(objective.into_expr().plus_constant(1.0));
-    Ok(())
+    Ok(objective.into_expr().plus_constant(1.0))
 }
 
 /// A tagged terminal uses its measured physical anchor; ordinary vertices use

@@ -239,6 +239,10 @@ pub struct FloorplanArgs {
     #[arg(long = "pp-scheme", value_enum, default_value_t = PpScheme::Double)]
     pub pp_scheme: PpScheme,
 
+    /// Balance stream FIFO capacity against pipeline latency (AutoBridge method).
+    #[arg(long = "balance-latency")]
+    pub balance_latency: bool,
+
     /// Time limit for a single ILP solve, in seconds. A plan runs several.
     #[arg(
         long = "max-seconds",
@@ -405,6 +409,7 @@ pub fn run(args: &FloorplanArgs, ctx: &CliContext) -> Result<()> {
         threads: 1,
         partition_strategy: args.partition_strategy.into(),
         scheme: args.pp_scheme.into(),
+        balance_latency: args.balance_latency,
     };
     options
         .validate()
@@ -761,6 +766,7 @@ mod tests {
                 usage_limit: 0.0,
                 partition_strategy: PartitionMode::Auto,
                 pp_scheme: PpScheme::Double,
+                balance_latency: false,
                 max_seconds: 60,
                 connectivity: None,
                 run_impl: false,
@@ -775,6 +781,13 @@ mod tests {
         )
         .expect_err("invalid usage limit");
         assert!(matches!(err, CliError::InvalidArg(_)));
+    }
+
+    #[test]
+    fn floorplan_accepts_auto_bridge_latency_balancing_flag() {
+        let args = FloorplanArgs::try_parse_from(["floorplan", "--balance-latency"])
+            .expect("latency balancing flag");
+        assert!(args.balance_latency);
     }
 
     #[test]
@@ -872,6 +885,7 @@ mod tests {
                     usage_limit: 0.7,
                     partition_strategy: PartitionMode::Auto,
                     pp_scheme: PpScheme::Double,
+                    balance_latency: false,
                     max_seconds: 60,
                     connectivity: connectivity_path,
                     run_impl: false,
@@ -915,6 +929,7 @@ mod tests {
             usage_limit: 0.7,
             partition_strategy: PartitionMode::Auto,
             pp_scheme: PpScheme::Double,
+            balance_latency: false,
             max_seconds: 60,
             connectivity: None,
             run_impl: false,
@@ -1064,6 +1079,7 @@ mod tests {
             usage_limit: 0.7,
             partition_strategy: PartitionMode::Auto,
             pp_scheme: PpScheme::Double,
+            balance_latency: false,
             max_seconds: 60,
             connectivity: None,
             run_impl: false,
@@ -1095,6 +1111,7 @@ mod tests {
             usage_limit: 0.7,
             partition_strategy: PartitionMode::Auto,
             pp_scheme: PpScheme::Double,
+            balance_latency: false,
             max_seconds: 60,
             connectivity: None,
             run_impl: false,

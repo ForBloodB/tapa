@@ -444,6 +444,7 @@ mod tests {
             grid: (2, 3),
             regions: BTreeMap::from([("Add_0".to_string(), "SLOT_X0Y0_TO_SLOT_X0Y0".to_string())]),
             routes: Vec::new(),
+            stream_fifo_depths: BTreeMap::new(),
             slot_usage: BTreeMap::from([("SLOT_X0Y0_TO_SLOT_X0Y0".to_string(), Area::default())]),
         });
         work_io::store(work, &state).expect("store state");

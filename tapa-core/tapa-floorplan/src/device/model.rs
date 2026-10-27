@@ -255,16 +255,15 @@ pub enum DeviceValidationError {
 }
 
 impl Device {
-    /// Whether the floorplanner should enforce this resource class.
-    /// 是否由 floorplanner 对该资源类别施加容量约束。
-    ///
-    /// V80's BRAM/URAM sites may appear in physical pblock ranges for Vivado
-    /// DFX legality, but they do not limit TAPA placement capacity.
-    /// V80 的 BRAM/URAM 站点可以列入 Vivado DFX 物理 pblock 范围，
-    /// 但不限制 TAPA 的 placement 容量预算。
+    /// V80 memory uses the full shell inventory as a hard capacity limit;
+    /// the utilization target derates logic and DSP resources independently.
     #[must_use]
-    pub fn constrains_resource(&self, resource: Resource) -> bool {
-        !(self.key == "v80" && matches!(resource, Resource::Bram18k | Resource::Uram))
+    pub fn resource_limit(&self, resource: Resource, utilization_limit: f64) -> f64 {
+        if self.key == "v80" && matches!(resource, Resource::Bram18k | Resource::Uram) {
+            1.0
+        } else {
+            utilization_limit
+        }
     }
 
     /// Validate the table values interpolated into implementation Tcl and the

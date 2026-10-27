@@ -82,6 +82,17 @@ When `--enable-synth-util` has run, `report.json`/`report.yaml` mark `area.sourc
 
 The checks above improve *throughput* (II, memory, FIFO depth). To improve *clock frequency* (Fmax) on a multi-SLR device, run `tapa floorplan` between `synth` and `pack`. It assigns tasks to SLRs, balances resource usage across them, adds pipeline registers on the channels that cross SLR boundaries, and generates the placement and timing constraints for `pack`.
 
+On V80, the current `slash_v80_service` static shell exposes SLR1 and SLR2 in
+its DFX reconfigurable PBlock. TAPA balances normalized resource load as a
+soft placement cost, including BRAM and URAM. Memory placement and generated
+FIFO resources must also fit the full per-SLR BRAM/URAM inventory; logic and
+DSP utilization targets are applied separately. SLR0 remains unavailable until the
+SLASH static shell is rebuilt with SLR0 inside the reconfigurable partition;
+an RM XDC cannot extend that shell boundary.
+V80 SLR constraints apply once to each task or pipeline-stage hierarchy root;
+internal RAM hierarchies inherit that placement rather than receiving duplicate
+assignments. Crossing-register `USER_SLL_REG` guidance is retained separately.
+
 ### When it helps
 
 Floorplanning helps when your design is **SLR-crossing-bound**: without it, Vivado either fails to route at your target clock or leaves long, slow paths across dies. Typical signs are routing congestion or worst paths that hop between SLRs. If your design already meets timing, you don't need it.
@@ -103,11 +114,22 @@ tapa --work-dir work.out floorplan \
 
 See the [`tapa floorplan` CLI reference](../reference/cli.md) for the full flag set.
 
+To use AutoBridge's weighted latency-balancing pass, add `--balance-latency`.
+It can increase FIFO capacity on shorter stream paths so reconvergent inputs
+arrive with aligned pipeline latency. A positive-latency cycle is infeasible
+for this model and is reported as an error; leave the option off for such a
+design.
+
 ### What floorplanning can and cannot fix
 
 Floorplanning fixes problems caused by **placement and routing** — SLR crossings, congestion, and reset-distribution delay. It does **not** change the logic inside a task. If your worst failing paths live entirely within one task (a long combinational chain the HLS scheduler placed in a single cycle), no floorplan will close timing; you need to restructure that task (e.g. add a `[[tapa::pipeline(1)]]`, split the operation across cycles).
 
-To tell the two apart, read the post-implementation timing report: worst paths whose *source and destination sit in different SLRs*, or whose source is a reset/clock tree, are placement problems the floorplan can address; worst paths contained inside a single task instance are logic-depth problems that require HLS changes.
+To tell the two apart, read the post-implementation timing report and compare
+logic delay with net delay. Paths between different SLRs can benefit from
+floorplanning and registered crossings. Paths inside one task can also be
+limited by routing, such as a high-fanout stall or clock-enable net. Long
+arithmetic chains require HLS scheduling or source changes; task hierarchy
+alone does not identify the cause.
 
 ## Advanced flags summary
 

@@ -307,6 +307,7 @@ fn register_budgets(
 
 /// Replace pre-routing FIFO estimates with the resources of the generated
 /// Head/Body/Tail pipelines, then enforce the placement retry envelope.
+#[cfg(test)]
 pub(crate) fn realize_slot_usage(
     graph: &FloorGraph,
     regions: &BTreeMap<String, String>,
@@ -327,11 +328,39 @@ pub(crate) fn realize_slot_usage(
 }
 
 /// Realize generated resources with independent logic and block-resource caps.
+#[cfg(test)]
 pub(crate) fn realize_slot_usage_with_resource_caps(
     graph: &FloorGraph,
     regions: &BTreeMap<String, String>,
     baseline: &BTreeMap<String, Area>,
     routes: &[PipelineRoute],
+    device: &Device,
+    logic_capacity_limit: f64,
+    block_capacity_limit: f64,
+) -> Result<BTreeMap<String, Area>, PipelineError> {
+    realize_slot_usage_with_resource_caps_and_depths(
+        graph,
+        regions,
+        baseline,
+        routes,
+        &BTreeMap::new(),
+        device,
+        logic_capacity_limit,
+        block_capacity_limit,
+    )
+}
+
+/// Realize generated resources using optional stream FIFO depth overrides.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "resource accounting needs the graph, placement, routes, depth overrides, and per-resource caps"
+)]
+pub(crate) fn realize_slot_usage_with_resource_caps_and_depths(
+    graph: &FloorGraph,
+    regions: &BTreeMap<String, String>,
+    baseline: &BTreeMap<String, Area>,
+    routes: &[PipelineRoute],
+    stream_fifo_depths: &BTreeMap<String, u32>,
     device: &Device,
     logic_capacity_limit: f64,
     block_capacity_limit: f64,
@@ -353,7 +382,11 @@ pub(crate) fn realize_slot_usage_with_resource_caps(
                             link: fifo.clone(),
                             detail: "no matching stream metadata".to_string(),
                         })?;
-                account_stream_pipeline(&mut usage, graph, regions, route, stream, fifo)?;
+                let depth = stream_fifo_depths
+                    .get(fifo)
+                    .copied()
+                    .unwrap_or(stream.depth);
+                account_stream_pipeline(&mut usage, graph, regions, route, stream, depth, fifo)?;
             }
             RoutedChannel::Axi {
                 endpoint,
@@ -379,6 +412,42 @@ pub(crate) fn realize_slot_usage_with_resource_caps(
                     .ok_or_else(|| accounting_error(&link, "no matching control metadata"))?;
                 account_control_pipeline(&mut usage, graph, regions, route, net, &link)?;
             }
+        }
+    }
+
+    for stream in graph.streams() {
+        let Some(&depth) = stream_fifo_depths.get(&stream.link) else {
+            continue;
+        };
+        if depth < stream.depth {
+            return Err(accounting_error(
+                &stream.link,
+                "balanced FIFO depth is smaller than its source depth",
+            ));
+        }
+        let has_route = routes.iter().any(|route| {
+            matches!(&route.channel, RoutedChannel::Stream { fifo } if fifo == &stream.link)
+        });
+        if has_route || depth == stream.depth {
+            continue;
+        }
+        let destination = &graph.vertex(stream.dst).name;
+        let region = regions
+            .get(destination)
+            .ok_or_else(|| accounting_error(&stream.link, "no destination placement"))?;
+        let region = canonical_slot_region(region)?;
+        let original = fifo_area(
+            stream.data_width,
+            floorplanned_fifo_storage_depth(stream.depth),
+        );
+        let balanced = fifo_area(stream.data_width, floorplanned_fifo_storage_depth(depth));
+        subtract_usage(&mut usage, &region, original, &stream.link)?;
+        add_usage(&mut usage, &region, balanced, &stream.link)?;
+    }
+
+    for fifo in stream_fifo_depths.keys() {
+        if !streams.contains_key(fifo.as_str()) {
+            return Err(accounting_error(fifo, "no matching stream metadata"));
         }
     }
 
@@ -478,8 +547,15 @@ fn account_stream_pipeline(
     regions: &BTreeMap<String, String>,
     route: &PipelineRoute,
     stream: &crate::graph::Stream,
+    logical_depth: u32,
     fifo: &str,
 ) -> Result<(), PipelineError> {
+    if logical_depth < stream.depth {
+        return Err(accounting_error(
+            fifo,
+            "balanced FIFO depth is smaller than its source depth",
+        ));
+    }
     let head_region = route
         .route
         .first()
@@ -505,8 +581,7 @@ fn account_stream_pipeline(
         .checked_mul(2)
         .and_then(|level| level.checked_add(6))
         .ok_or_else(|| accounting_error(fifo, "Tail depth overflows u32"))?;
-    let real_depth = stream
-        .depth
+    let real_depth = logical_depth
         .checked_add(extra_depth)
         .ok_or_else(|| accounting_error(fifo, "Tail depth overflows u32"))?;
     add_usage(
@@ -616,21 +691,17 @@ fn validate_realized_usage(
         let capacity = device
             .island_area(&coor)
             .ok_or_else(|| PipelineError::BadRegion(region.clone()))?;
-        let logic_limit = scaled_area(capacity, logic_capacity_limit);
-        let block_limit = scaled_area(capacity, block_capacity_limit);
         for resource in Resource::ALL {
-            if !device.constrains_resource(resource) {
-                // Do not reject V80 plans for hard-block usage; Vivado places
-                // BRAM/URAM after TAPA has fixed the SLR/NOC topology.
-                // 不因硬块用量拒绝 V80 布局；TAPA 固定 SLR/NOC 拓扑后由 Vivado 放置。
-                continue;
-            }
             let used = resource.amount(used_area);
-            let allowed = if resource.is_logic() {
-                resource.amount(&logic_limit)
+            let limit = if resource.is_logic() {
+                logic_capacity_limit
             } else {
-                resource.amount(&block_limit)
+                block_capacity_limit
             };
+            let allowed = resource.amount(&scaled_area(
+                capacity,
+                device.resource_limit(resource, limit),
+            ));
             if used > allowed {
                 return Err(PipelineError::RealizedCapacity {
                     region: region.clone(),
@@ -1470,6 +1541,90 @@ mod tests {
             fifo_area(33, 22),
             "the crossing Tail uses logical depth plus six safety entries",
         );
+    }
+
+    #[test]
+    fn v80_balanced_depth_reaccounts_a_co_located_registered_ready_fifo() {
+        let graph = one_stream_graph(16, Area::default(), Area::default());
+        let region = Coor::slot(0, 1).region_name();
+        let regions = BTreeMap::from([
+            ("Producer_0".to_string(), region.clone()),
+            ("Consumer_0".to_string(), region.clone()),
+        ]);
+        let baseline = baseline_usage(&graph, &regions);
+        let depths = BTreeMap::from([("q_Top".to_string(), 24)]);
+
+        let realized = realize_slot_usage_with_resource_caps_and_depths(
+            &graph,
+            &regions,
+            &baseline,
+            &[],
+            &depths,
+            &select_device("v80").expect("v80"),
+            MAX_USAGE_LIMIT,
+            MAX_USAGE_LIMIT,
+        )
+        .expect("re-account the enlarged co-located FIFO");
+
+        assert_eq!(
+            realized[&region],
+            fifo_area(33, floorplanned_fifo_storage_depth(24)),
+            "the registered-ready implementation retains its five storage entries",
+        );
+    }
+
+    #[test]
+    fn v80_balanced_depth_reaccounts_a_slr_crossing_tail_fifo() {
+        let graph = one_stream_graph(16, Area::default(), Area::default());
+        let source = Coor::slot(0, 1).region_name();
+        let destination = Coor::slot(0, 2).region_name();
+        let regions = BTreeMap::from([
+            ("Producer_0".to_string(), source.clone()),
+            ("Consumer_0".to_string(), destination.clone()),
+        ]);
+        let baseline = baseline_usage(&graph, &regions);
+        let route = PipelineRoute {
+            channel: RoutedChannel::Stream {
+                fifo: "q_Top".to_string(),
+            },
+            route: vec!["SLOT_X0Y1".to_string(), "SLOT_X0Y2".to_string()],
+            scheme: PipelineScheme::Double,
+            reg_regions: vec!["SLOT_X0Y1".to_string(), "SLOT_X0Y2".to_string()],
+        };
+        let depths = BTreeMap::from([("q_Top".to_string(), 24)]);
+
+        let realized = realize_slot_usage_with_resource_caps_and_depths(
+            &graph,
+            &regions,
+            &baseline,
+            &[route],
+            &depths,
+            &select_device("v80").expect("v80"),
+            MAX_USAGE_LIMIT,
+            MAX_USAGE_LIMIT,
+        )
+        .expect("re-account the enlarged Tail FIFO");
+
+        assert_eq!(
+            realized[&source],
+            Area {
+                lut: 1,
+                ff: 70,
+                ..Area::default()
+            },
+            "the V80 vertical Double route places Head and one Body in SLR1",
+        );
+        assert_eq!(
+            realized[&destination],
+            fifo_area(33, 34)
+                .checked_add(Area {
+                    ff: 35,
+                    ..Area::default()
+                })
+                .unwrap(),
+            "SLR2 holds the balanced Tail and the second vertical Body",
+        );
+        assert!(!realized.contains_key("SLOT_X0Y0_TO_SLOT_X0Y0"));
     }
 
     #[test]

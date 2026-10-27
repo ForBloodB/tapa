@@ -822,6 +822,7 @@ mod tests {
             grid: (2, 3),
             regions: std::collections::BTreeMap::new(),
             routes: Vec::new(),
+            stream_fifo_depths: std::collections::BTreeMap::new(),
             slot_usage: std::collections::BTreeMap::new(),
         }
     }

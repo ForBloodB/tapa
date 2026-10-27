@@ -24,6 +24,8 @@ pub struct PlanOptions {
     pub partition_strategy: PartitionStrategy,
     /// How pipeline registers are distributed across each crossing's route.
     pub scheme: PipelineScheme,
+    /// Apply weighted stream latency balancing after placement and routing.
+    pub balance_latency: bool,
 }
 
 impl Default for PlanOptions {
@@ -34,6 +36,7 @@ impl Default for PlanOptions {
             threads: 1,
             partition_strategy: PartitionStrategy::Auto,
             scheme: PipelineScheme::Double,
+            balance_latency: false,
         }
     }
 }

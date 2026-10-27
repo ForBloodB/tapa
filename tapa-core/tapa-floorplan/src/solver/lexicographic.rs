@@ -61,6 +61,48 @@ pub fn refine(
     Ok(refined.is_found().then_some(refined))
 }
 
+/// Pin the primary objective, minimize a secondary physical cost, then apply
+/// the stable candidate ranking with both optima retained.
+pub fn refine_with_secondary(
+    lp: &mut LpModel,
+    solver: &dyn Solver,
+    opts: &SolveOpts,
+    primary: LinExpr,
+    primary_achieved: f64,
+    secondary: LinExpr,
+    rank_rows: &[Vec<LpVar>],
+) -> Result<Option<LpSolution>, SolverError> {
+    lp.add_constraint(
+        "lexicographic_primary_pin",
+        primary,
+        Comparison::Le,
+        pin_bound(primary_achieved),
+    );
+    if secondary
+        .terms
+        .iter()
+        .all(|(coefficient, _)| *coefficient == 0.0)
+    {
+        lp.set_objective(rank_objective(rank_rows));
+        let refined = solver.solve(lp, opts)?;
+        return Ok(refined.is_found().then_some(refined));
+    }
+    lp.set_objective(secondary.clone());
+    let secondary_solution = solver.solve(lp, opts)?;
+    if !secondary_solution.is_found() {
+        return Ok(None);
+    }
+    lp.add_constraint(
+        "lexicographic_secondary_pin",
+        secondary,
+        Comparison::Le,
+        pin_bound(secondary_solution.objective),
+    );
+    lp.set_objective(rank_objective(rank_rows));
+    let refined = solver.solve(lp, opts)?;
+    Ok(refined.is_found().then_some(refined))
+}
+
 /// The stable candidate ranking `Σ candidate_index·var` over the one-of-k
 /// rows; the zero-ranked candidate of every row is free.
 fn rank_objective(rank_rows: &[Vec<LpVar>]) -> LinExpr {
@@ -180,5 +222,42 @@ mod tests {
         let refined = refine(&mut model, &solver, &SolveOpts::default(), pin, 1.0, &rows)
             .expect("scripted solve succeeds");
         assert!(refined.is_none(), "no incumbent, caller falls back");
+    }
+
+    #[test]
+    fn secondary_refinement_pins_both_objectives_before_ranking() {
+        let (mut model, rows) = tiny_model();
+        let primary = model.objective.clone();
+        let secondary = LinExpr::sum([(1.0, rows[0][1])]);
+        let solver = ScriptedSolver {
+            solution: LpSolution {
+                status: LpStatus::Optimal,
+                objective: 0.0,
+                values: std::collections::HashMap::new(),
+            },
+        };
+
+        let refined = refine_with_secondary(
+            &mut model,
+            &solver,
+            &SolveOpts::default(),
+            primary,
+            0.0,
+            secondary,
+            &rows,
+        )
+        .expect("scripted solves succeed");
+
+        assert!(refined.is_some());
+        assert_eq!(
+            model
+                .constraints
+                .iter()
+                .map(|row| row.name.as_str())
+                .filter(|name| name.starts_with("lexicographic_"))
+                .collect::<Vec<_>>(),
+            ["lexicographic_primary_pin", "lexicographic_secondary_pin"],
+        );
+        assert_eq!(model.objective, rank_objective(&rows));
     }
 }

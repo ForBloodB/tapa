@@ -204,6 +204,7 @@ fn validate_result(result: &FloorplanResult, device: &Device) -> Result<(), XdcE
                         .to_string(),
                 });
             }
+            validate_v80_rm_slot(device, region)?;
         }
     }
     for route in &result.routes {
@@ -225,6 +226,9 @@ fn validate_result(result: &FloorplanResult, device: &Device) -> Result<(), XdcE
                     detail: format!("slot is outside device `{}`", device.key),
                 });
             }
+            if device.key == "v80" {
+                validate_v80_rm_slot(device, stage)?;
+            }
         }
     }
     // `cell_name_regex` matches `{name}` and `{name}_fifo`; two keys related
@@ -241,6 +245,21 @@ fn validate_result(result: &FloorplanResult, device: &Device) -> Result<(), XdcE
                 second: (*second).clone(),
             });
         }
+    }
+    Ok(())
+}
+
+fn validate_v80_rm_slot(device: &Device, region: &str) -> Result<(), XdcError> {
+    let coor = Coor::from_region_or_slot_name(region).expect("validated region");
+    let slot = device
+        .slot(coor.dl_x, coor.dl_y)
+        .expect("validated region is an in-device slot");
+    if slot.area.lut == 0 || slot.area.ff == 0 {
+        return Err(XdcError::InvalidRegion {
+            region: region.to_string(),
+            detail: "outside the SLASH DFX reconfigurable PBlock; rebuild the static shell to enable this SLR"
+                .to_string(),
+        });
     }
     Ok(())
 }
@@ -294,6 +313,20 @@ enum CellPlacement<'a> {
 }
 
 impl CellPlacement<'_> {
+    fn pattern(self, pattern: &str) -> String {
+        match self {
+            Self::Pblock(_) => pattern.to_string(),
+            // A hierarchy assignment already covers its contents. Assigning
+            // descendants again makes Vivado count nested RAM demand twice.
+            Self::Slr(_) => format!(
+                "{}$",
+                pattern
+                    .strip_suffix("(/.*)?$")
+                    .expect("cell patterns include descendants")
+            ),
+        }
+    }
+
     fn hierarchical_cells_only(self) -> bool {
         matches!(self, Self::Slr(_))
     }
@@ -350,8 +383,7 @@ fn add_cell_matches(lines: &mut Vec<String>, matches: &[CellMatch], placement: C
     }
 
     for cell_match in matches {
-        // `USER_SLR_ASSIGNMENT` is a hierarchy property in Vivado. Keep the
-        // broader query for PBlocks and filter to hierarchy cells for V80.
+        // PBlocks include descendants; SLR assignments belong on roots only.
         let hierarchy_filter = if placement.hierarchical_cells_only() {
             " && IS_PRIMITIVE == 0"
         } else {
@@ -359,7 +391,7 @@ fn add_cell_matches(lines: &mut Vec<String>, matches: &[CellMatch], placement: C
         };
         lines.push(format!(
             "set cells [get_cells -quiet -hierarchical -regexp -filter {{NAME =~ \"{}\"{hierarchy_filter}}}]",
-            cell_match.pattern
+            placement.pattern(&cell_match.pattern)
         ));
         lines.push(format!(
             "if {{![llength $cells]}} {{ error \"TAPA floorplan ERROR: expected cell `{}` was not found\" }}",
@@ -409,8 +441,9 @@ fn add_batched_cell_matches(
 ) {
     let patterns = matches
         .iter()
-        .map(|cell_match| cell_match.pattern.as_str())
+        .map(|cell_match| placement.pattern(&cell_match.pattern))
         .collect::<Vec<_>>();
+    let patterns = patterns.iter().map(String::as_str).collect::<Vec<_>>();
     append_batched_cell_query(
         lines,
         "cells",
@@ -740,6 +773,7 @@ mod tests {
                 ),
             ]),
             routes: Vec::new(),
+            stream_fifo_depths: Map::new(),
             slot_usage: Map::from([(
                 "SLOT_X0Y0_TO_SLOT_X0Y0".to_string(),
                 Area {
@@ -789,6 +823,7 @@ set_false_path -quiet -through [get_nets -quiet -hier -filter {NAME =~ \"*periph
             grid: (2, 3),
             regions: Map::from([("Worker_0".to_string(), "SLOT_X1Y1_TO_SLOT_X1Y1".to_string())]),
             routes: Vec::new(),
+            stream_fifo_depths: Map::new(),
             slot_usage: Map::new(),
         };
 
@@ -832,23 +867,66 @@ set_false_path -quiet -through [get_nets -quiet -hier -filter {NAME =~ \"*periph
 
     #[test]
     fn v80_assigns_hierarchies_to_slrs_without_slot_pblocks() {
-        let result = FloorplanResult {
-            device: "v80".to_string(),
-            grid: (1, 3),
-            regions: Map::from([("Worker_0".to_string(), "SLOT_X0Y2_TO_SLOT_X0Y2".to_string())]),
-            routes: Vec::new(),
-            slot_usage: Map::new(),
-        };
         let device = select_device("v80").expect("v80");
+        // Exercise both query paths with Callipepla's nested URAM hierarchy.
+        for task_count in [1, 16] {
+            let result = FloorplanResult {
+                device: "v80".to_string(),
+                grid: (1, 3),
+                regions: (0..task_count)
+                    .map(|index| {
+                        (
+                            format!("PEG_Yvec_{index}"),
+                            "SLOT_X0Y2_TO_SLOT_X0Y2".to_string(),
+                        )
+                    })
+                    .collect(),
+                routes: Vec::new(),
+                stream_fifo_depths: Map::new(),
+                slot_usage: Map::new(),
+            };
+            let xdc = emit_xdc(&result, &device).expect("render V80 constraints");
 
-        let xdc = emit_xdc(&result, &device).expect("render V80 constraints");
-
-        assert!(xdc.contains("IS_PRIMITIVE == 0"));
-        assert!(xdc.contains("set_property USER_SLR_ASSIGNMENT SLR2 $cells"));
-        assert!(!xdc.contains("create_pblock"));
-        assert!(!xdc.contains("resize_pblock"));
-        assert!(!xdc.contains("add_cells_to_pblock"));
-        assert!(!xdc.contains("pblock_slash"));
+            assert!(xdc.contains("IS_PRIMITIVE == 0"));
+            assert!(xdc.contains("set_property USER_SLR_ASSIGNMENT SLR2 $cells"));
+            assert!(!xdc.contains("create_pblock"));
+            assert!(!xdc.contains("resize_pblock"));
+            assert!(!xdc.contains("add_cells_to_pblock"));
+            let query = xdc
+                .lines()
+                .find(|line| line.starts_with("set cells "))
+                .expect("placement query");
+            let pattern = query
+                .split("NAME =~ \"")
+                .nth(1)
+                .expect("name filter")
+                .split('"')
+                .next()
+                .expect("pattern");
+            let pattern = pattern
+                .strip_prefix('(')
+                .and_then(|text| text.strip_suffix(')'))
+                .unwrap_or(pattern);
+            let patterns = pattern.split('|').collect::<Vec<_>>();
+            for index in 0..task_count {
+                let task = format!("top_i/slash/Callipepla_0/inst/PEG_Yvec_{index}");
+                for ram in 0..8 {
+                    let child = format!("{task}/local_C_{ram}_U");
+                    let coverage = [&task, &child]
+                        .into_iter()
+                        .filter(|name| patterns.iter().any(|pattern| regex_matches(pattern, name)))
+                        .count();
+                    assert_eq!(
+                        coverage, 1,
+                        "each URAM must have exactly one assigned ancestor: {child}"
+                    );
+                    assert!(
+                        patterns.iter().any(|pattern| regex_matches(pattern, &task)),
+                        "task root must retain its assignment: {task}"
+                    );
+                }
+            }
+        }
     }
 
     #[test]
@@ -861,31 +939,33 @@ set_false_path -quiet -through [get_nets -quiet -hier -filter {NAME =~ \"*periph
                 channel: RoutedChannel::Stream {
                     fifo: "crossing_fifo".to_string(),
                 },
-                route: vec![
-                    "SLOT_X0Y0".to_string(),
-                    "SLOT_X0Y1".to_string(),
-                    "SLOT_X0Y2".to_string(),
-                ],
+                route: vec!["SLOT_X0Y1".to_string(), "SLOT_X0Y2".to_string()],
                 scheme: PipelineScheme::Double,
-                reg_regions: vec![
-                    "SLOT_X0Y0".to_string(),
-                    "SLOT_X0Y1".to_string(),
-                    "SLOT_X0Y2".to_string(),
-                ],
+                reg_regions: vec!["SLOT_X0Y1".to_string(), "SLOT_X0Y2".to_string()],
             }],
+            stream_fifo_depths: Map::new(),
             slot_usage: Map::new(),
         };
         let device = select_device("v80").expect("v80");
 
         let xdc = emit_xdc(&result, &device).expect("render V80 crossing constraints");
 
-        for slr in 0..3 {
+        for slr in 1..3 {
             assert!(
                 xdc.contains(&format!("set_property USER_SLR_ASSIGNMENT SLR{slr} $cells")),
                 "{xdc}"
             );
         }
         assert!(xdc.contains("set_property USER_SLL_REG TRUE $sll_regs"));
+        for line in xdc.lines().filter(|line| line.starts_with("set cells ")) {
+            assert!(
+                !line.contains("(/.*)?$"),
+                "SLR assignments must select stage roots: {line}"
+            );
+        }
+        for index in 0..2 {
+            assert!(xdc.contains(&format!("set sll_cells [get_cells -quiet -hierarchical -regexp -filter {{NAME =~ \"{}\"}}]", pipeline_body_regex("crossing_fifo_fifo", index))), "SLL guidance must still select internal registers: {xdc}");
+        }
         assert!(!xdc.contains("create_pblock"));
         assert!(!xdc.contains("resize_pblock"));
     }
@@ -897,6 +977,7 @@ set_false_path -quiet -through [get_nets -quiet -hier -filter {NAME =~ \"*periph
             grid: (1, 3),
             regions: Map::from([("Worker_0".to_string(), "SLOT_X0Y1_TO_SLOT_X0Y2".to_string())]),
             routes: Vec::new(),
+            stream_fifo_depths: Map::new(),
             slot_usage: Map::new(),
         };
         let device = select_device("v80").expect("v80");
@@ -904,6 +985,25 @@ set_false_path -quiet -through [get_nets -quiet -hier -filter {NAME =~ \"*periph
         let error = emit_xdc(&result, &device).expect_err("one task cannot span multiple SLRs");
 
         assert!(error.to_string().contains("one atomic SLR per instance"));
+    }
+
+    #[test]
+    fn v80_rejects_slr0_until_the_slash_static_shell_includes_it() {
+        let result = FloorplanResult {
+            device: "v80".to_string(),
+            grid: (1, 3),
+            regions: Map::from([("Worker_0".to_string(), "SLOT_X0Y0".to_string())]),
+            routes: Vec::new(),
+            stream_fifo_depths: Map::new(),
+            slot_usage: Map::new(),
+        };
+        let device = select_device("v80").expect("v80");
+
+        let error = emit_xdc(&result, &device).expect_err("SLR0 is outside the shell RP");
+
+        assert!(error
+            .to_string()
+            .contains("outside the SLASH DFX reconfigurable PBlock"));
     }
 
     #[test]
@@ -920,6 +1020,7 @@ set_false_path -quiet -through [get_nets -quiet -hier -filter {NAME =~ \"*periph
                 })
                 .collect::<Map<_, _>>(),
             routes: Vec::new(),
+            stream_fifo_depths: Map::new(),
             slot_usage: Map::new(),
         };
         let device = select_device("u250").expect("u250");
@@ -978,6 +1079,7 @@ set_false_path -quiet -through [get_nets -quiet -hier -filter {NAME =~ \"*periph
                 ("B_0".to_string(), "SLOT_X1Y1_TO_SLOT_X1Y1".to_string()),
             ]),
             routes: Vec::new(),
+            stream_fifo_depths: Map::new(),
             slot_usage: Map::new(),
         };
         let device = select_device("u280").expect("u280");
@@ -1059,14 +1161,19 @@ set_false_path -quiet -through [get_nets -quiet -hier -filter {NAME =~ \"*periph
     /// component. Vivado runs the real regex at implementation time; this only
     /// backs the assertions above.
     fn regex_matches(pattern: &str, name: &str) -> bool {
-        let literal = pattern
-            .strip_prefix("^(.*/)?")
-            .and_then(|p| p.strip_suffix("(_fifo)?(/.*)?$"))
-            .expect("pattern shape")
-            .replace('\\', "");
+        let body = pattern.strip_prefix("^(.*/)?").expect("pattern prefix");
+        let (literal, descendants) = body.strip_suffix("(_fifo)?(/.*)?$").map_or_else(
+            || (body.strip_suffix("(_fifo)?$").expect("root pattern"), false),
+            |literal| (literal, true),
+        );
+        let literal = literal.replace('\\', "");
         let with_fifo = format!("{literal}_fifo");
-        name.split('/')
-            .any(|component| component == literal || component == with_fifo)
+        let matches = |component: &str| component == literal || component == with_fifo;
+        if descendants {
+            name.split('/').any(matches)
+        } else {
+            name.rsplit('/').next().is_some_and(matches)
+        }
     }
 
     #[test]
@@ -1109,6 +1216,7 @@ set_false_path -quiet -through [get_nets -quiet -hier -filter {NAME =~ \"*periph
             grid: (2, 3),
             regions: Map::from([("T".to_string(), "SLOT_X0Y1_TO_SLOT_X1Y1".to_string())]),
             routes: Vec::new(),
+            stream_fifo_depths: Map::new(),
             slot_usage: Map::new(),
         };
         let device = select_device("u280").expect("u280");
@@ -1169,6 +1277,7 @@ set_false_path -quiet -through [get_nets -quiet -hier -filter {NAME =~ \"*periph
                 scheme: PipelineScheme::Double,
                 reg_regions: vec!["SLOT_X0Y0".to_string(), "SLOT_X1Y0".to_string()],
             }],
+            stream_fifo_depths: Map::new(),
             slot_usage: Map::new(),
         };
         let device = select_device("u280").expect("u280");
@@ -1227,6 +1336,7 @@ set_false_path -quiet -through [get_nets -quiet -hier -filter {NAME =~ \"*periph
                 scheme: PipelineScheme::Single,
                 reg_regions: Vec::new(),
             }],
+            stream_fifo_depths: Map::new(),
             slot_usage: Map::new(),
         };
         let xdc = emit_xdc(&result, &select_device("u280").expect("u280")).expect("render");
@@ -1286,6 +1396,7 @@ set_false_path -quiet -through [get_nets -quiet -hier -filter {NAME =~ \"*periph
                     reg_regions: vec!["SLOT_X0Y1".to_string()],
                 },
             ],
+            stream_fifo_depths: Map::new(),
             slot_usage: Map::new(),
         };
         let xdc = emit_xdc(&result, &select_device("u280").expect("u280")).expect("render");
@@ -1358,6 +1469,7 @@ set_false_path -quiet -through [get_nets -quiet -hier -filter {NAME =~ \"*periph
                 scheme: PipelineScheme::Double,
                 reg_regions: vec!["SLOT_X0Y0".to_string(), "SLOT_X1Y0".to_string()],
             }],
+            stream_fifo_depths: Map::new(),
             slot_usage: Map::new(),
         };
         let xdc = emit_xdc(&result, &select_device("u280").expect("u280")).expect("render");
@@ -1410,6 +1522,7 @@ set_false_path -quiet -through [get_nets -quiet -hier -filter {NAME =~ \"*periph
                 scheme: PipelineScheme::Single,
                 reg_regions: vec!["SLOT_X0Y1".to_string()],
             }],
+            stream_fifo_depths: Map::new(),
             slot_usage: Map::new(),
         };
         let xdc = emit_xdc(&result, &select_device("u280").expect("u280")).expect("render");
@@ -1454,6 +1567,7 @@ set_false_path -quiet -through [get_nets -quiet -hier -filter {NAME =~ \"*periph
                 .map(|(k, v)| ((*k).to_string(), (*v).to_string()))
                 .collect(),
             routes,
+            stream_fifo_depths: Map::new(),
             slot_usage: Map::new(),
         }
     }
@@ -1468,6 +1582,7 @@ set_false_path -quiet -through [get_nets -quiet -hier -filter {NAME =~ \"*periph
             grid: (2, 4),
             regions: Map::new(),
             routes: Vec::new(),
+            stream_fifo_depths: Map::new(),
             slot_usage: Map::new(),
         };
         assert!(matches!(
@@ -1554,6 +1669,7 @@ set_false_path -quiet -through [get_nets -quiet -hier -filter {NAME =~ \"*periph
                 "SLOT_X0Y0_TO_SLOT_X0Y0".to_string(),
             )]),
             routes: Vec::new(),
+            stream_fifo_depths: Map::new(),
             slot_usage: Map::new(),
         };
         let xdc = emit_xdc(&result, &select_device("u280").expect("u280")).expect("render");

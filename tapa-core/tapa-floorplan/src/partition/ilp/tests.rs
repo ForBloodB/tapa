@@ -5,7 +5,7 @@ use std::sync::Mutex;
 use super::*;
 use crate::device::model::{DirCaps, Slot};
 use crate::device::select::select_device;
-use crate::solver::{LpSolution, VarKind};
+use crate::solver::{CbcSolver, LpSolution, VarKind};
 use crate::ExactInt;
 
 fn named_terms(model: &LpModel, expr: &LinExpr) -> BTreeMap<String, f64> {
@@ -937,6 +937,132 @@ fn multilevel_infeasible_refinement_reuses_the_flat_atomic_formulation() {
         crate::solver::write_cplex_lp(&expected.lp).expect("render expected model"),
         "fallback must use the existing atomic variables, rows, and objective unchanged"
     );
+}
+
+#[test]
+fn v80_balances_uram_with_full_shell_capacity_limits() {
+    let graph = single_task_floor_graph_with_area(Area {
+        lut: 1000,
+        ff: 2000,
+        bram_18k: 8,
+        dsp: 4,
+        uram: 16,
+    });
+    let device = select_device("v80").expect("v80");
+    let regions = [Coor::slot(0, 1), Coor::slot(0, 2)];
+    let domains = vec![regions.to_vec(); graph.vertices().len()];
+    let constraints = PlacementConstraints::default();
+    let model = FloorplanModel::build(
+        &graph,
+        &device,
+        &domains,
+        &domain_areas(&device, &domains),
+        &[],
+        DEFAULT_USAGE_LIMIT,
+        &constraints,
+    )
+    .expect("V80 model");
+
+    assert!(model.balance_objective.is_some());
+    for (region, capacity) in [(regions[0], 96.0_f64), (regions[1], 496.0_f64)] {
+        assert!(model.lp.constraints.iter().any(|row| {
+            row.name == format!("node_{}_URAM_usage", region.region_name())
+                && row.op == Comparison::Le
+                && row.rhs.to_bits() == capacity.to_bits()
+        }));
+    }
+    assert!(model.lp.constraints.iter().any(|row| {
+        row.name == "soft_load_SLOT_X0Y1_TO_SLOT_X0Y1_URAM"
+            && row.op == Comparison::Le
+            && row.rhs == 0.0
+    }));
+    assert!(model.lp.constraints.iter().any(|row| {
+        row.name == "soft_load_SLOT_X0Y2_TO_SLOT_X0Y2_URAM"
+            && row.op == Comparison::Le
+            && row.rhs == 0.0
+    }));
+}
+
+#[test]
+fn v80_places_callipepla_uram_demand_at_a_lower_logic_limit() {
+    let area = Area {
+        uram: 32,
+        ..Area::default()
+    };
+    let vertices = (0..16)
+        .map(|index| Vertex {
+            name: format!("PEG_Yvec_{index}"),
+            area,
+            required_tag: None,
+            materialize: true,
+        })
+        .collect::<Vec<_>>();
+    let graph = FloorGraph {
+        index: vertices
+            .iter()
+            .enumerate()
+            .map(|(index, vertex)| (vertex.name.clone(), index))
+            .collect(),
+        vertices,
+        placement_edges: Vec::new(),
+        streams: Vec::new(),
+        axi_nets: Vec::new(),
+        control_nets: Vec::new(),
+        co_located: Vec::new(),
+    };
+    let device = select_device("v80").expect("v80");
+    let regions = [Coor::slot(0, 1), Coor::slot(0, 2)];
+    let domains = vec![regions.to_vec(); graph.vertices().len()];
+    let constraints = PlacementConstraints::default();
+    let mut model = FloorplanModel::build(
+        &graph,
+        &device,
+        &domains,
+        &domain_areas(&device, &domains),
+        &[],
+        DEFAULT_USAGE_LIMIT,
+        &constraints,
+    )
+    .expect("V80 model");
+    let solver = CbcSolver::new();
+    let primary = solver
+        .solve(&model.lp, &SolveOpts::default())
+        .expect("CBC solves the soft balance objective");
+    assert!(primary.is_found());
+    let refined = model
+        .refine_lexicographic(&solver, &SolveOpts::default(), &primary)
+        .expect("CBC refines soft balance and wire cost")
+        .expect("refinement has an incumbent");
+    let placements = model
+        .read_back(&graph, &domains, &refined)
+        .expect("read back placements");
+    let slr1_count = placements
+        .values()
+        .filter(|region| **region == Coor::slot(0, 1))
+        .count();
+    let slr2_count = placements
+        .values()
+        .filter(|region| **region == Coor::slot(0, 2))
+        .count();
+
+    assert_eq!((slr1_count, slr2_count), (2, 14));
+
+    let overflowing = single_task_floor_graph_with_area(Area {
+        uram: 497,
+        ..Area::default()
+    });
+    assert!(matches!(
+        candidate_domains(
+            &overflowing,
+            &device,
+            &regions,
+            &domain_areas(&device, &domains),
+            DEFAULT_USAGE_LIMIT,
+            None,
+            &constraints,
+        ),
+        Err(IlpError::NoCandidates { .. })
+    ));
 }
 
 #[test]

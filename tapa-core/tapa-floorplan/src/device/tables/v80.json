@@ -437,7 +437,7 @@
             ],
             "tags": [],
             "wire_cap": {
-                "north": 18870
+                "north": 0
             },
             "x": 0,
             "y": 0
@@ -448,7 +448,7 @@
                 "dsp": 752,
                 "ff": 259520,
                 "lut": 129760,
-                "uram": 216
+                "uram": 96
             },
             "centroid_x": 0,
             "centroid_y": 150,
@@ -471,7 +471,7 @@
                 "dsp": 3120,
                 "ff": 1415616,
                 "lut": 707808,
-                "uram": 328
+                "uram": 496
             },
             "centroid_x": 0,
             "centroid_y": 300,

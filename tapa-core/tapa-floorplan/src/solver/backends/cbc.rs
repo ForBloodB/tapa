@@ -80,7 +80,9 @@ impl Solver for CbcSolver {
 
         let sol_text = std::fs::read_to_string(&sol_path).map_err(|source| {
             SolverError::BadOutput(format!(
-                "CBC did not produce a readable solution file: {source}"
+                "CBC did not produce a readable solution file: {source}; stdout: {}; stderr: {}",
+                String::from_utf8_lossy(&output.stdout).trim(),
+                String::from_utf8_lossy(&output.stderr).trim(),
             ))
         })?;
         validate_solution(parse_sol(&sol_text)?, model)
